@@ -1,0 +1,11 @@
+name: documentai
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - pymupdf>=1.24
+      - pymupdf4llm>=0.0.17
+      - markdown>=3.5
+      - pytest>=8.0

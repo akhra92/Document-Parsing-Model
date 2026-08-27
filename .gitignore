@@ -1,3 +1,15 @@
 # Dataset
 dataset/
 
+# Pipeline outputs
+output/
+parsed/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
