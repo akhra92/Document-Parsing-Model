@@ -11,10 +11,10 @@ def test_pipeline_writes_all_three_formats(sample_pdf, tmp_path):
     result = DocumentPipeline(out).run(sample_pdf)
 
     assert result.ok, result.error
-    assert set(result.outputs) == {"text", "html", "markdown"}
+    assert set(result.outputs) == {"text", "markdown", "json"}
     assert (out / "sample.txt").exists()
-    assert (out / "sample.html").exists()
     assert (out / "sample.md").exists()
+    assert json.loads((out / "sample.json").read_text(encoding="utf-8"))["page_count"] == 2
     assert result.converted is False and result.page_count == 2
 
 
@@ -65,8 +65,8 @@ def test_extracted_images_are_linked_relatively(illustrated_pdf, tmp_path):
         assert f"images/illustrated/{image.name}" in markdown
 
 
-def test_output_refuses_to_overwrite_its_own_input(sample_html, tmp_path):
-    result = DocumentPipeline(sample_html.parent, formats=["html"]).run(sample_html)
+def test_output_refuses_to_overwrite_its_own_input(sample_txt, tmp_path):
+    result = DocumentPipeline(sample_txt.parent, formats=["text"]).run(sample_txt)
 
     assert result.ok is False
     assert "overwrite the input" in result.error
@@ -95,6 +95,19 @@ def test_manifest_summarises_the_run(tmp_path, sample_pdf):
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert payload["documents"] == 1 and payload["succeeded"] == 1
     assert payload["results"][0]["outputs"]["text"].endswith("sample.txt")
+
+
+def test_manifest_never_clobbers_a_documents_json(tmp_path, sample_pdf):
+    twin = tmp_path / "manifest.pdf"
+    twin.write_bytes(sample_pdf.read_bytes())
+    out = tmp_path / "out"
+
+    results = DocumentPipeline(out, formats=["json"]).run_many([twin])
+    written = write_manifest(results, out / "manifest.json")
+
+    assert written == out / "manifest_run.json"
+    document = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert document["page_count"] == 2  # the document's own JSON survived
 
 
 def test_cli_end_to_end(tmp_path, sample_pdf, capsys):

@@ -1,12 +1,12 @@
 # DocumentAI
 
 A document parsing pipeline built on **PyMuPDF**. Every input is normalised to
-PDF first, then parsed into **plain text**, **HTML** and **Markdown**.
+PDF first, then parsed into **plain text**, **Markdown** and **structured JSON**.
 
 ```
 input (any supported format) ──▶ stage 1: convert to PDF ──▶ stage 2: parse ──┬─▶ .txt
-                                                                              ├─▶ .html
-                                                                              └─▶ .md
+                                                                              ├─▶ .md
+                                                                              └─▶ .json
 ```
 
 A PDF input skips the conversion work and goes straight to parsing.
@@ -42,10 +42,11 @@ Equivalent module form: `python -m documentai ...`
 | Option | Effect |
 | --- | --- |
 | `-o, --output DIR` | where extracted files land (default `output`) |
-| `-f, --formats` | any of `text` `html` `markdown` (aliases `txt` `md` `htm`) |
+| `-f, --formats` | any of `text` `markdown` `json` (aliases `txt` `md`) |
 | `-r, --recursive` | descend into subdirectories of directory inputs |
 | `--keep-pdf` | keep the intermediate PDF under `OUTPUT/pdf/` |
 | `--images` | write embedded images to `OUTPUT/images/<stem>/` and link them from the Markdown |
+| `--no-spans` | drop the per-span font detail from the JSON (much smaller files) |
 | `--manifest [PATH]` | JSON summary of the run |
 | `--soffice PATH` | LibreOffice executable for Office inputs |
 | `--timeout SEC` | per-document LibreOffice timeout (default 180) |
@@ -59,8 +60,8 @@ usage error. One bad file never aborts a batch.
 ```
 output/
 ├── report.txt          # plain text, pages separated by \f
-├── report.html         # self-contained, one <section class="page"> per page
 ├── report.md           # Markdown (headings, lists, tables)
+├── report.json         # per-page blocks with geometry and font detail
 ├── images/report/…     # only with --images
 ├── pdf/report.pdf      # only with --keep-pdf
 └── manifest.json       # only with --manifest
@@ -94,7 +95,7 @@ from documentai import convert_to_pdf, extract, parse_pdf
 
 convert_to_pdf("slides.pptx", "slides.pdf")
 markdown = extract("slides.pdf", "md")
-parsed = parse_pdf("slides.pdf", ["text", "html"])   # opens the file once
+parsed = parse_pdf("slides.pdf", ["text", "json"])   # opens the file once
 ```
 
 ## Supported inputs
@@ -109,16 +110,64 @@ parsed = parse_pdf("slides.pdf", ["text", "html"])   # opens the file once
 
 `documentai --help` prints the full list. Unsupported extensions are skipped
 when scanning a directory, and reported as an error when named explicitly.
+HTML is an *input* format only — there is no HTML output.
 
 ## How each format is produced
 
 - **Text** — `page.get_text("text", sort=True)` per page, joined with form feeds.
-- **HTML** — PyMuPDF's HTML extraction per page (absolutely positioned spans,
-  base64-inlined images) wrapped in one self-contained document. No external
-  assets, so the file opens anywhere.
 - **Markdown** — `pymupdf4llm`, which reconstructs headings, lists and tables.
   If it is not installed, a built-in font-size heuristic takes over so the
   pipeline still produces Markdown.
+- **JSON** — `page.get_text("dict")` reshaped into a stable schema: document
+  metadata, then each page with its text and blocks. Coordinates are PDF points
+  with the origin at the page's top-left corner.
+
+```jsonc
+{
+  "source": "report.pdf",
+  "page_count": 2,
+  "metadata": { "title": "…", "creationDate": "…" },
+  "pages": [
+    {
+      "number": 1,
+      "width": 595.0,
+      "height": 842.0,
+      "text": "Quarterly Report\nRevenue grew 18% …",
+      "blocks": [
+        {
+          "number": 0,
+          "type": "text",
+          "bbox": [64.0, 71.9, 231.4, 92.0],
+          "text": "Quarterly Report",
+          "lines": [
+            {
+              "bbox": [64.0, 71.9, 231.4, 92.0],
+              "text": "Quarterly Report",
+              "spans": [
+                {
+                  "text": "Quarterly Report",
+                  "font": "NimbusSans-Bold",
+                  "size": 20.0,
+                  "bold": true,
+                  "italic": false,
+                  "color": "#000000",
+                  "bbox": [64.0, 71.9, 231.4, 92.0]
+                }
+              ]
+            }
+          ]
+        },
+        { "number": 5, "type": "image", "bbox": [64.0, 300.1, 320.0, 460.0],
+          "width": 480, "height": 300, "ext": "png" }
+      ]
+    }
+  ]
+}
+```
+
+Image blocks carry placement and size but never raw bytes — use `--images` to
+write the actual files. `--no-spans` drops the `spans` key when you only need
+block text and geometry.
 
 Scanned PDFs contain no text layer; run OCR upstream if you need one.
 
@@ -137,7 +186,7 @@ The LibreOffice test is skipped automatically when LibreOffice is absent.
 documentai/
 ├── formats.py      input extension → conversion strategy registry
 ├── converters.py   stage 1: anything → PDF
-├── parsers.py      stage 2: PDF → text / HTML / Markdown
+├── parsers.py      stage 2: PDF → text / Markdown / JSON
 ├── pipeline.py     orchestration, batching, manifest
 ├── cli.py          argparse front end
 └── exceptions.py   error hierarchy

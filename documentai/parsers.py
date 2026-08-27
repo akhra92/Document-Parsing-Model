@@ -1,8 +1,8 @@
-"""Stage 2 of the pipeline: extract text, HTML and Markdown from a PDF."""
+"""Stage 2 of the pipeline: extract text, Markdown and structured JSON from a PDF."""
 
 from __future__ import annotations
 
-import html as html_lib
+import json as json_lib
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -16,40 +16,24 @@ __all__ = [
     "OUTPUT_FORMATS",
     "ParsedDocument",
     "extract",
-    "extract_html",
+    "extract_json",
     "extract_markdown",
     "extract_text",
     "parse_pdf",
 ]
 
 #: Output format name -> file extension.
-OUTPUT_FORMATS: dict[str, str] = {"text": ".txt", "html": ".html", "markdown": ".md"}
+OUTPUT_FORMATS: dict[str, str] = {"text": ".txt", "markdown": ".md", "json": ".json"}
 
 #: Accepted spellings on the CLI.
-_ALIASES = {"txt": "text", "text": "text", "html": "html", "htm": "html",
-            "md": "markdown", "markdown": "markdown"}
+_ALIASES = {"txt": "text", "text": "text", "md": "markdown", "markdown": "markdown",
+            "json": "json"}
 
 _PAGE_BREAK = "\f"
-_BODY_RE = re.compile(r"<body[^>]*>(.*)</body>", re.DOTALL | re.IGNORECASE)
 
-_HTML_SHELL = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-<style>
-body {{ margin: 0; background: #e9e9ee; font-family: sans-serif; }}
-.page {{ margin: 16px auto; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.25); }}
-.page > div {{ position: relative; }}
-img {{ max-width: 100%; }}
-</style>
-</head>
-<body>
-{pages}
-</body>
-</html>
-"""
+#: Bit 4 of a span's ``flags`` marks bold, bit 1 marks italic.
+_FLAG_BOLD = 2 ** 4
+_FLAG_ITALIC = 2 ** 1
 
 
 @dataclass
@@ -59,8 +43,8 @@ class ParsedDocument:
     path: Path
     page_count: int
     text: str | None = None
-    html: str | None = None
     markdown: str | None = None
+    json: str | None = None
     #: Image files written while extracting Markdown.
     images: list[Path] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
@@ -84,17 +68,19 @@ def normalize_format(fmt: str) -> str:
 
 def parse_pdf(
     pdf_path: str | Path,
-    formats: list[str] | tuple[str, ...] = ("text", "html", "markdown"),
+    formats: list[str] | tuple[str, ...] = ("text", "markdown", "json"),
     *,
     image_dir: str | Path | None = None,
     image_link_base: str | None = None,
+    spans: bool = True,
     sort: bool = True,
 ) -> ParsedDocument:
     """Open ``pdf_path`` once and extract every requested format from it.
 
     ``image_dir`` turns on image extraction for the Markdown output;
     ``image_link_base`` is the prefix written into the Markdown links (use a
-    relative one so the ``.md`` stays portable).
+    relative one so the ``.md`` stays portable). ``spans`` keeps the per-span
+    font detail in the JSON output.
     """
     pdf_path = Path(pdf_path)
     wanted = [normalize_format(f) for f in formats]
@@ -117,12 +103,12 @@ def parse_pdf(
         )
         if "text" in wanted:
             parsed.text = extract_text(doc, sort=sort)
-        if "html" in wanted:
-            parsed.html = extract_html(doc, title=pdf_path.stem)
         if "markdown" in wanted:
             parsed.markdown, parsed.images = extract_markdown(
                 doc, image_dir=image_dir, image_link_base=image_link_base
             )
+        if "json" in wanted:
+            parsed.json = extract_json(doc, source=pdf_path, spans=spans, sort=sort)
         return parsed
     finally:
         doc.close()
@@ -147,17 +133,28 @@ def extract_text(doc: pymupdf.Document, *, sort: bool = True) -> str:
     return (_PAGE_BREAK + "\n").join(pages).rstrip() + "\n"
 
 
-def extract_html(doc: pymupdf.Document, *, title: str = "document") -> str:
-    """A single self-contained HTML file, one ``div.page`` per PDF page.
+def extract_json(
+    doc: pymupdf.Document,
+    *,
+    source: str | Path | None = None,
+    spans: bool = True,
+    sort: bool = True,
+    indent: int | None = 2,
+) -> str:
+    """Structured JSON: document metadata plus per-page text blocks with geometry.
 
-    PyMuPDF emits absolutely positioned spans and base64-inlined images, so the
-    result keeps the original layout without referencing any external asset.
+    Every coordinate is in PDF points with the origin at the top-left of the
+    page. Image blocks carry their placement and size but never the raw bytes -
+    use ``--images`` for those.
     """
-    pages = []
-    for number, page in enumerate(doc, start=1):
-        fragment = _page_body(page.get_text("html"))
-        pages.append(f'<section class="page" id="page-{number}">\n{fragment}\n</section>')
-    return _HTML_SHELL.format(title=html_lib.escape(title), pages="\n".join(pages))
+    payload = {
+        "source": Path(source).name if source else None,
+        "page_count": doc.page_count,
+        "metadata": {k: v for k, v in (doc.metadata or {}).items() if v},
+        "pages": [_page_payload(page, spans=spans, sort=sort) for page in doc],
+    }
+    text = json_lib.dumps(payload, indent=indent, ensure_ascii=False)
+    return (_inline_number_arrays(text) if indent else text) + "\n"
 
 
 def extract_markdown(
@@ -200,10 +197,74 @@ def extract_markdown(
 # --------------------------------------------------------------------------- #
 
 
-def _page_body(page_html: str) -> str:
-    """Strip the document wrapper PyMuPDF may put around a page's HTML."""
-    match = _BODY_RE.search(page_html)
-    return (match.group(1) if match else page_html).strip()
+def _page_payload(page: pymupdf.Page, *, spans: bool, sort: bool) -> dict:
+    """One page as plain data: its text, and every block with its bounding box."""
+    raw = page.get_text("dict", sort=sort)
+    blocks = []
+    for block in raw["blocks"]:
+        entry: dict = {
+            "number": block["number"],
+            "type": "image" if block["type"] == 1 else "text",
+            "bbox": _round_all(block["bbox"]),
+        }
+        if block["type"] == 1:
+            entry.update(
+                width=block.get("width"),
+                height=block.get("height"),
+                ext=block.get("ext"),
+            )
+        else:
+            lines = [_line_payload(line, spans=spans) for line in block["lines"]]
+            entry["text"] = "\n".join(line["text"] for line in lines).strip()
+            entry["lines"] = lines
+        blocks.append(entry)
+
+    return {
+        "number": page.number + 1,
+        "width": round(raw["width"], 2),
+        "height": round(raw["height"], 2),
+        "text": page.get_text("text", sort=sort).strip(),
+        "blocks": blocks,
+    }
+
+
+def _line_payload(line: dict, *, spans: bool) -> dict:
+    payload = {
+        "bbox": _round_all(line["bbox"]),
+        "text": "".join(span["text"] for span in line["spans"]),
+    }
+    if spans:
+        payload["spans"] = [
+            {
+                "text": span["text"],
+                "font": span["font"],
+                "size": round(span["size"], 2),
+                "bold": bool(span["flags"] & _FLAG_BOLD),
+                "italic": bool(span["flags"] & _FLAG_ITALIC),
+                "color": f"#{span['color']:06x}",
+                "bbox": _round_all(span["bbox"]),
+            }
+            for span in line["spans"]
+        ]
+    return payload
+
+
+def _round_all(box) -> list[float]:
+    return [round(value, 2) for value in box]
+
+
+def _inline_number_arrays(text: str) -> str:
+    """Put pretty-printed arrays of plain numbers (the bboxes) back on one line."""
+    def collapse(match: re.Match) -> str:
+        numbers = (part.strip() for part in match.group(1).split(","))
+        return "[" + ", ".join(numbers) + "]"
+
+    return _NUMBER_ARRAY_RE.sub(collapse, text)
+
+
+#: An indented array holding only numbers - i.e. a bbox. The required newlines
+#: keep this from ever matching inside a string literal, where JSON escapes them.
+_NUMBER_ARRAY_RE = re.compile(r"\[\n\s*(-?\d[\d.,\s\n-]*?)\n\s*\]")
 
 
 def _relink_images(markdown: str, image_dir: Path, link_base: str | None) -> str:
@@ -242,7 +303,7 @@ def _heuristic_markdown(doc: pymupdf.Document) -> str:
                     continue
                 lines.append("".join(s["text"] for s in spans).strip())
                 max_size = max(max_size, *(s["size"] for s in spans))
-                bold &= all(s["flags"] & 2 ** 4 for s in spans)
+                bold &= all(s["flags"] & _FLAG_BOLD for s in spans)
             if not lines:
                 continue
             text = " ".join(lines).strip()

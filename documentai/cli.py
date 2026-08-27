@@ -17,7 +17,7 @@ from .pipeline import DocumentPipeline, collect_inputs, write_manifest
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="documentai",
-        description="Convert documents to PDF and extract text, HTML and Markdown.",
+        description="Convert documents to PDF and extract text, Markdown and JSON.",
         epilog="supported inputs: " + " ".join(supported_extensions()),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -25,9 +25,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="files or directories to process")
     parser.add_argument("-o", "--output", default="output", metavar="DIR",
                         help="directory for the extracted files")
-    parser.add_argument("-f", "--formats", nargs="+", default=["text", "html", "markdown"],
+    parser.add_argument("-f", "--formats", nargs="+", default=["text", "markdown", "json"],
                         metavar="FMT",
-                        help=f"any of: {', '.join(OUTPUT_FORMATS)} (aliases: txt, md, htm)")
+                        help=f"any of: {', '.join(OUTPUT_FORMATS)} (aliases: txt, md)")
     parser.add_argument("-r", "--recursive", action="store_true",
                         help="descend into subdirectories of directory inputs")
     parser.add_argument("--keep-pdf", action="store_true",
@@ -35,6 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--images", action="store_true",
                         help="write embedded images under OUTPUT/images/ and link them "
                              "from the Markdown")
+    parser.add_argument("--no-spans", action="store_true",
+                        help="drop the per-span font detail from the JSON output")
     parser.add_argument("--manifest", nargs="?", const="manifest.json", metavar="PATH",
                         help="write a JSON run summary (default name: manifest.json, "
                              "relative to OUTPUT)")
@@ -67,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
             formats=args.formats,
             keep_pdf=args.keep_pdf,
             extract_images=args.images,
+            spans=not args.no_spans,
             soffice=args.soffice,
             timeout=args.timeout,
             overwrite=not args.no_overwrite,
@@ -91,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         manifest = Path(args.manifest)
         if not manifest.is_absolute():
             manifest = Path(args.output) / manifest
-        write_manifest(results, manifest)
+        manifest = write_manifest(results, manifest)
         if not args.quiet:
             print(f"manifest: {manifest}")
 

@@ -1,4 +1,4 @@
-"""The end-to-end pipeline: any input -> PDF -> text / HTML / Markdown."""
+"""The end-to-end pipeline: any input -> PDF -> text / Markdown / JSON."""
 
 from __future__ import annotations
 
@@ -57,9 +57,10 @@ class DocumentPipeline:
         self,
         output_dir: str | Path,
         *,
-        formats: list[str] | tuple[str, ...] = ("text", "html", "markdown"),
+        formats: list[str] | tuple[str, ...] = ("text", "markdown", "json"),
         keep_pdf: bool = False,
         extract_images: bool = False,
+        spans: bool = True,
         soffice: str | Path | None = None,
         timeout: int = DEFAULT_TIMEOUT,
         overwrite: bool = True,
@@ -70,6 +71,7 @@ class DocumentPipeline:
             raise ValueError("at least one output format is required")
         self.keep_pdf = keep_pdf
         self.extract_images = extract_images
+        self.spans = spans
         self.soffice = soffice
         self.timeout = timeout
         self.overwrite = overwrite
@@ -108,6 +110,7 @@ class DocumentPipeline:
                 self.formats,
                 image_dir=image_dir,
                 image_link_base=f"images/{stem}" if image_dir else None,
+                spans=self.spans,
             )
             result.page_count = parsed.page_count
             result.images = list(parsed.images)
@@ -183,8 +186,14 @@ def collect_inputs(paths, *, recursive: bool = False) -> list[Path]:
 
 
 def write_manifest(results: list[DocumentResult], destination: str | Path) -> Path:
-    """Write a JSON summary of a batch run."""
+    """Write a JSON summary of a batch run.
+
+    Steps aside if a document's own JSON output already claims that filename.
+    """
     destination = Path(destination)
+    extracted = {path.resolve() for r in results for path in r.outputs.values()}
+    if destination.resolve() in extracted:
+        destination = destination.with_name(f"{destination.stem}_run{destination.suffix}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "documents": len(results),

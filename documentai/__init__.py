@@ -1,7 +1,7 @@
 """DocumentAI - a PyMuPDF document parsing pipeline.
 
 Any supported input is normalised to PDF first, then parsed into plain text,
-HTML and Markdown:
+Markdown and structured JSON:
 
     from documentai import DocumentPipeline
 
@@ -22,7 +22,15 @@ from .exceptions import (
     UnsupportedFormatError,
 )
 from .formats import is_supported, supported_extensions
-from .parsers import OUTPUT_FORMATS, ParsedDocument, extract, parse_pdf
+from .parsers import (
+    OUTPUT_FORMATS,
+    ParsedDocument,
+    extract,
+    extract_json,
+    extract_markdown,
+    extract_text,
+    parse_pdf,
+)
 from .pipeline import DocumentPipeline, DocumentResult, collect_inputs, write_manifest
 
 __all__ = [
@@ -39,6 +47,9 @@ __all__ = [
     "collect_inputs",
     "convert_to_pdf",
     "extract",
+    "extract_json",
+    "extract_markdown",
+    "extract_text",
     "is_supported",
     "parse_pdf",
     "supported_extensions",
