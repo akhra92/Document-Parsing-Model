@@ -5,6 +5,10 @@ dataset/
 output/
 parsed/
 
+# Editor / IDE
+.vscode/
+.idea/
+
 # Python
 __pycache__/
 *.py[cod]
