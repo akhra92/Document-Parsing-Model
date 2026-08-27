@@ -14,9 +14,10 @@ A PDF input skips the conversion work and goes straight to parsing.
 ## Install
 
 ```bash
-conda env create -f environment.yml      # creates the "documentai" env
+conda create -n documentai python=3.11
 conda activate documentai
-pip install -e .
+pip install -e .          # the package and its dependencies
+pip install -r requirements.txt   # adds streamlit for the web app
 ```
 
 Office inputs (`.docx`, `.pptx`, `.xlsx`, `.odt`, …) additionally need
