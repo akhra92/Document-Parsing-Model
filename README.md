@@ -24,6 +24,39 @@ Office inputs (`.docx`, `.pptx`, `.xlsx`, `.odt`, …) additionally need
 in the usual install locations; otherwise point `--soffice` or the
 `DOCUMENTAI_SOFFICE` environment variable at the executable.
 
+## Web app
+
+`app.py` is a Streamlit front end: upload documents, pick formats, preview the
+results and download them individually or as a ZIP.
+
+```bash
+streamlit run app.py
+```
+
+### Deploying to Streamlit Community Cloud
+
+1. Push this repository to GitHub.
+2. At [share.streamlit.io](https://share.streamlit.io) choose **Create app → Deploy
+   a public app from GitHub**, select the repo and branch, and set the main file
+   path to `app.py`.
+3. Deploy. The first build takes several minutes because `packages.txt` installs
+   LibreOffice.
+
+The deployment files:
+
+| File | Purpose |
+| --- | --- |
+| `app.py` | the entry point Streamlit Cloud runs |
+| `requirements.txt` | Python dependencies (includes `streamlit`) |
+| `packages.txt` | apt packages — LibreOffice, for the Office formats |
+| `.streamlit/config.toml` | upload cap and theme |
+
+The app degrades gracefully: if LibreOffice is unavailable the sidebar says so
+and every non-Office format still works. Community Cloud gives an app ~1 GB of
+memory, so `config.toml` caps uploads at 50 MB — a large scanned PDF can still
+exhaust that. Uploads are processed in a temporary directory that is deleted as
+soon as the outputs are read into memory; nothing persists on the server.
+
 ## Usage
 
 ```bash
@@ -183,6 +216,7 @@ The LibreOffice test is skipped automatically when LibreOffice is absent.
 ## Project layout
 
 ```
+app.py              Streamlit web front end
 documentai/
 ├── formats.py      input extension → conversion strategy registry
 ├── converters.py   stage 1: anything → PDF

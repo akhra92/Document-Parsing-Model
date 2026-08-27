@@ -1,0 +1,8 @@
+[server]
+# Community Cloud allows up to 200 MB; keep uploads well under the 1 GB
+# memory ceiling a converted document has to fit into.
+maxUploadSize = 50
+
+[theme]
+base = "light"
+primaryColor = "#3b6fd4"
