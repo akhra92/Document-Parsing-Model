@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from documentai import pipeline as pipeline_module
 from documentai.cli import main
 from documentai.pipeline import DocumentPipeline, collect_inputs, write_manifest
 
@@ -18,14 +19,14 @@ def test_pipeline_writes_all_three_formats(sample_pdf, tmp_path):
     assert result.converted is False and result.page_count == 2
 
 
-def test_non_pdf_input_is_converted_first(sample_md, tmp_path):
+def test_non_pdf_input_is_converted_first(sample_png, tmp_path):
     out = tmp_path / "out"
-    result = DocumentPipeline(out, formats=["text"], keep_pdf=True).run(sample_md)
+    result = DocumentPipeline(out, formats=["text"], keep_pdf=True).run(sample_png)
 
     assert result.ok, result.error
-    assert result.strategy == "story" and result.converted is True
-    assert result.pdf == out / "pdf" / "readme.pdf" and result.pdf.exists()
-    assert "Title" in (out / "readme.txt").read_text(encoding="utf-8")
+    assert result.strategy == "pymupdf" and result.converted is True
+    assert result.pdf == out / "pdf" / "picture.pdf" and result.pdf.exists()
+    assert (out / "picture.txt").exists()
 
 
 def test_failures_are_reported_not_raised(tmp_path):
@@ -65,26 +66,32 @@ def test_extracted_images_are_linked_relatively(illustrated_pdf, tmp_path):
         assert f"images/illustrated/{image.name}" in markdown
 
 
-def test_output_refuses_to_overwrite_its_own_input(sample_txt, tmp_path):
-    result = DocumentPipeline(sample_txt.parent, formats=["text"]).run(sample_txt)
+def test_output_refuses_to_overwrite_its_own_input(sample_pdf, monkeypatch):
+    """No supported input extension collides with .txt/.md/.json any more, so the
+    guard is provoked by pretending the text output is written as .pdf."""
+    monkeypatch.setattr(pipeline_module, "OUTPUT_FORMATS", {"text": ".pdf"})
+
+    result = DocumentPipeline(sample_pdf.parent, formats=["text"]).run(sample_pdf)
 
     assert result.ok is False
     assert "overwrite the input" in result.error
+    assert sample_pdf.stat().st_size > 0  # the input is still intact
 
 
-def test_collect_inputs_filters_and_recurses(tmp_path, sample_pdf, sample_txt):
+def test_collect_inputs_filters_and_recurses(tmp_path, sample_pdf, sample_png):
     (tmp_path / "ignore.zzz").write_bytes(b"x")
+    (tmp_path / "notes.txt").write_text("plain text is not an input", encoding="utf-8")
     sub = tmp_path / "sub"
     sub.mkdir()
-    (sub / "deep.txt").write_text("deep", encoding="utf-8")
+    (sub / "deep.pdf").write_bytes(sample_pdf.read_bytes())
 
     flat = collect_inputs([tmp_path])
-    assert sample_pdf in flat and sample_txt in flat
-    assert not any(p.suffix == ".zzz" for p in flat)
-    assert sub / "deep.txt" not in flat
+    assert sample_pdf in flat and sample_png in flat
+    assert not any(p.suffix in (".zzz", ".txt") for p in flat)
+    assert sub / "deep.pdf" not in flat
 
     deep = collect_inputs([tmp_path], recursive=True)
-    assert sub / "deep.txt" in deep
+    assert sub / "deep.pdf" in deep
 
 
 def test_manifest_summarises_the_run(tmp_path, sample_pdf):

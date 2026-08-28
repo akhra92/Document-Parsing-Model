@@ -50,13 +50,13 @@ def test_process_returns_outputs_in_memory(app_module, sample_pdf):
     assert payload["converted"] is False
 
 
-def test_process_converts_non_pdf_input(app_module, sample_md):
+def test_process_converts_non_pdf_input(app_module, sample_png):
     payload = app_module.process(
-        "readme.md", sample_md.read_bytes(), ("text",), False, True, True
+        "picture.png", sample_png.read_bytes(), ("text",), False, True, True
     )
 
-    assert payload["ok"] and payload["strategy"] == "story"
-    assert "Title" in payload["outputs"]["text"]
+    assert payload["ok"] and payload["strategy"] == "pymupdf"
+    assert payload["outputs"]["text"] is not None
     assert payload["pdf"] and payload["pdf"].startswith(b"%PDF")
 
 

@@ -2,6 +2,12 @@
 
 Every supported extension maps to exactly one *conversion strategy*, which is
 what :mod:`documentai.converters` dispatches on to produce a PDF.
+
+Only binary or paginated formats are accepted - ones where the structure has to
+be recovered from a rendered layout. Text, Markdown and HTML are deliberately
+absent: they already carry explicit structure, so rendering them to a page and
+statistically re-deriving it loses information (links and tables in particular).
+They are what this package emits, not what it ingests.
 """
 
 from __future__ import annotations
@@ -20,11 +26,6 @@ IMAGE_EXTS = frozenset(
      ".pgm", ".ppm", ".pbm", ".tga", ".psd", ".jxr", ".jpx", ".jp2", ".webp"}
 )
 
-#: Markup and plain-text formats laid out through PyMuPDF's Story engine.
-MARKUP_EXTS = frozenset({".html", ".htm", ".xhtml"})
-MARKDOWN_EXTS = frozenset({".md", ".markdown", ".mdown", ".mkd"})
-TEXT_EXTS = frozenset({".txt", ".text", ".log", ".rst", ".json", ".yaml", ".yml", ".xml"})
-
 #: Office formats handed to a headless LibreOffice.
 OFFICE_EXTS = frozenset(
     {".doc", ".docx", ".docm", ".dot", ".dotx", ".odt", ".rtf", ".wps",
@@ -36,9 +37,6 @@ _STRATEGY_BY_EXT: dict[str, str] = {
     **{ext: "passthrough" for ext in PDF_EXTS},
     **{ext: "pymupdf" for ext in NATIVE_EXTS},
     **{ext: "image" for ext in IMAGE_EXTS},
-    **{ext: "markup" for ext in MARKUP_EXTS},
-    **{ext: "markdown" for ext in MARKDOWN_EXTS},
-    **{ext: "text" for ext in TEXT_EXTS},
     **{ext: "office" for ext in OFFICE_EXTS},
 }
 

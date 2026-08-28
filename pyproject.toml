@@ -5,13 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "documentai"
 version = "0.1.0"
-description = "Document parsing pipeline: any format -> PDF -> text, HTML, Markdown"
+description = "Document parsing pipeline: documents -> PDF -> text, Markdown, JSON"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "pymupdf>=1.24",
     "pymupdf4llm>=0.0.17",
-    "markdown>=3.5",
 ]
 
 [project.optional-dependencies]

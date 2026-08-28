@@ -23,21 +23,23 @@ def test_pdf_input_is_passed_through(sample_pdf, tmp_path):
     assert out.read_bytes() == sample_pdf.read_bytes()
 
 
-@pytest.mark.parametrize("fixture,needle", [
-    ("sample_txt", "Line one"),
-    ("sample_md", "Title"),
-    ("sample_html", "Report"),
+@pytest.mark.parametrize("name,content", [
+    ("notes.txt", "Line one\nLine two\n"),
+    ("readme.md", "# Title\n\n[link](https://example.com)\n"),
+    ("page.html", "<html><body><h1>Report</h1></body></html>"),
+    ("data.json", '{"a": 1}'),
 ])
-def test_text_like_inputs_become_pdfs(request, fixture, needle, tmp_path):
-    source = request.getfixturevalue(fixture)
-    out = tmp_path / "converted.pdf"
+def test_already_extracted_formats_are_rejected(name, content, tmp_path):
+    """Text, Markdown and HTML carry their own structure.
 
-    result = convert_to_pdf(source, out)
+    Rendering them to a page and re-deriving it loses information (links and
+    tables especially), so they are not accepted as inputs.
+    """
+    source = tmp_path / name
+    source.write_text(content, encoding="utf-8")
 
-    assert result.strategy == "story"
-    assert result.converted is True
-    assert out.exists() and out.stat().st_size > 0
-    assert needle in _page_text(out)
+    with pytest.raises(UnsupportedFormatError):
+        convert_to_pdf(source, tmp_path / "out.pdf")
 
 
 def test_image_becomes_single_page_pdf(sample_png, tmp_path):

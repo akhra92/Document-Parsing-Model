@@ -34,30 +34,6 @@ def illustrated_pdf(tmp_path: Path, sample_png: Path) -> Path:
 
 
 @pytest.fixture
-def sample_txt(tmp_path: Path) -> Path:
-    path = tmp_path / "notes.txt"
-    path.write_text("Line one\nLine two\n", encoding="utf-8")
-    return path
-
-
-@pytest.fixture
-def sample_md(tmp_path: Path) -> Path:
-    path = tmp_path / "readme.md"
-    path.write_text("# Title\n\nSome **bold** body text.\n", encoding="utf-8")
-    return path
-
-
-@pytest.fixture
-def sample_html(tmp_path: Path) -> Path:
-    path = tmp_path / "page.html"
-    path.write_text(
-        "<html><body><h1>Report</h1><p>Paragraph body.</p></body></html>",
-        encoding="utf-8",
-    )
-    return path
-
-
-@pytest.fixture
 def sample_png(tmp_path: Path) -> Path:
     path = tmp_path / "picture.png"
     pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 120, 80))

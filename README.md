@@ -139,12 +139,32 @@ parsed = parse_pdf("slides.pdf", ["text", "json"])   # opens the file once
 | PDF | `.pdf` | passed through untouched |
 | PyMuPDF-native | `.epub` `.xps` `.oxps` `.mobi` `.fb2` `.cbz` | re-emitted as PDF by PyMuPDF |
 | Images | `.png` `.jpg` `.jpeg` `.bmp` `.gif` `.tif` `.tiff` `.webp` `.jp2` `.psd` … | single-page PDF per image |
-| Text & markup | `.txt` `.md` `.html` `.htm` `.rst` `.json` `.yaml` `.xml` `.log` | laid out by PyMuPDF's `Story` engine |
 | Office | `.docx` `.doc` `.odt` `.rtf` `.pptx` `.ppt` `.odp` `.xlsx` `.xls` `.ods` `.csv` | headless LibreOffice |
 
 `documentai --help` prints the full list. Unsupported extensions are skipped
 when scanning a directory, and reported as an error when named explicitly.
-HTML is an *input* format only — there is no HTML output.
+
+### Why text, Markdown and HTML are not inputs
+
+Inputs are limited to **binary or paginated** formats — ones whose structure has
+to be recovered from a rendered layout. Text, Markdown and HTML already carry
+their structure explicitly (`<h1>`, `<table>`, `<a href>`), and this pipeline
+reconstructs structure *statistically from geometry* — "this span is 1.5× body
+size, therefore a heading". Feeding it markup would mean discarding known
+structure and guessing it back. Measured on a 310-byte Markdown file, the
+round trip lost:
+
+| Input | After a `.md` → PDF → `.md` round trip |
+| --- | --- |
+| `[the dashboard](https://example.com/dash)` | `the dashboard` — **URL gone** |
+| a 4-row Markdown table | `<!-- picture text -->Region Revenue<br>EU 1.2M…` |
+| `> Margin held at 32%.` | plain paragraph, quote lost |
+| ` ```python ` | ` ``` `, language lost |
+
+The three remaining strategies are all faithful: they either preserve the
+original pages or render a layout the source itself defines. Text, Markdown and
+JSON are what this package *emits* — for those inputs, reading the file directly
+is both lossless and faster.
 
 ## How each format is produced
 
