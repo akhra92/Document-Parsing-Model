@@ -209,6 +209,7 @@ Scanned PDFs contain no text layer; run OCR upstream if you need one.
 
 ```bash
 conda activate documentai
+pip install -e ".[dev]"   # adds pytest
 pytest
 ```
 
