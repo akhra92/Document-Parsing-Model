@@ -16,14 +16,71 @@ A PDF input skips the conversion work and goes straight to parsing.
 ```bash
 conda create -n documentai python=3.11
 conda activate documentai
-pip install -e .          # the package and its dependencies
-pip install -r requirements.txt   # adds streamlit for the web app
+pip install -e .                 # the library and CLI
+pip install -e ".[api,app,dev]"  # + HTTP API, Streamlit app, tests
 ```
+
+The extras are `api` (FastAPI + uvicorn), `app` (Streamlit), and `dev` (pytest).
+`requirements.txt` is separate — it is the manifest Streamlit Community Cloud
+installs from, so it pins only what the deployed web app needs.
 
 Office inputs (`.docx`, `.pptx`, `.xlsx`, `.odt`, …) additionally need
 [LibreOffice](https://www.libreoffice.org/). It is auto-detected on the PATH and
 in the usual install locations; otherwise point `--soffice` or the
 `DOCUMENTAI_SOFFICE` environment variable at the executable.
+
+## HTTP API
+
+`api.py` is a FastAPI service over the same pipeline.
+
+```bash
+pip install -e ".[api]"
+uvicorn api:app --reload
+```
+
+Interactive docs (Swagger UI) at `http://localhost:8000/docs`.
+
+| Endpoint | Does |
+| --- | --- |
+| `GET /health` | liveness, version, whether LibreOffice is available |
+| `GET /formats` | accepted inputs, available outputs, size limits |
+| `POST /parse` | upload documents → extractions returned inline as JSON |
+| `POST /convert` | upload one document → the PDF itself |
+| `POST /bundle` | upload documents → a ZIP of the outputs, plus a manifest |
+
+```bash
+# extract Markdown from a Word document
+curl -X POST "http://localhost:8000/parse?formats=markdown" -F "files=@report.docx"
+
+# several files at once, downloaded as a ZIP with images and the PDFs
+curl -X POST "http://localhost:8000/bundle?images=true&keep_pdf=true" \
+     -F "files=@a.docx" -F "files=@b.pdf" -o output.zip
+```
+
+`/parse` returns each document separately, so one bad file never fails the
+batch — it comes back with `"ok": false` and an `error`, and the response is
+still 200:
+
+```jsonc
+{
+  "documents": 2, "succeeded": 1, "failed": 1,
+  "results": [
+    { "filename": "report.docx", "ok": true, "strategy": "libreoffice",
+      "page_count": 3, "duration": 3.28,
+      "outputs": { "markdown": "# Quarterly Report…" } },
+    { "filename": "notes.html", "ok": false,
+      "error": "no conversion strategy for '.html' (notes.html)" }
+  ]
+}
+```
+
+JSON output is embedded as a real object, not a quoted string. Status codes:
+**415** for an input format the pipeline does not accept, **413** over the size
+or file-count limit, **422** for a bad format name or an empty upload.
+
+Uploads are capped at 50 MB and 20 files per request (`MAX_UPLOAD_BYTES` and
+`MAX_FILES` in `api.py`). Each request works in a temporary directory that is
+deleted before the response is sent.
 
 ## Web app
 
@@ -229,15 +286,17 @@ Scanned PDFs contain no text layer; run OCR upstream if you need one.
 
 ```bash
 conda activate documentai
-pip install -e ".[dev]"   # adds pytest
+pip install -e ".[api,app,dev]"
 pytest
 ```
 
-The LibreOffice test is skipped automatically when LibreOffice is absent.
+The LibreOffice test is skipped automatically when LibreOffice is absent, and
+the API tests skip themselves when the `api` extra is not installed.
 
 ## Project layout
 
 ```
+api.py              FastAPI HTTP service
 app.py              Streamlit web front end
 documentai/
 ├── formats.py      input extension → conversion strategy registry
