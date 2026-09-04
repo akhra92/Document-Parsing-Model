@@ -63,6 +63,44 @@ def test_missing_input_raises(tmp_path):
         convert_to_pdf(tmp_path / "nope.pdf", tmp_path / "out.pdf")
 
 
+def test_timeout_kills_the_whole_libreoffice_process_tree(tmp_path):
+    """A stand-in ``soffice`` that spawns a child and hangs, like the real
+    launcher does with ``soffice.bin``: after the timeout the child must be
+    gone as well, not left orphaned."""
+    import os
+    import sys
+    import time
+
+    import psutil
+
+    pid_file = tmp_path / "child.pid"
+    child = (
+        "import os, time; "
+        f"open({str(pid_file)!r}, 'w').write(str(os.getpid())); "
+        "time.sleep(60)"
+    )
+    if os.name == "nt":
+        stub = tmp_path / "soffice.bat"
+        stub.write_text(f'@echo off\r\n"{sys.executable}" -c "{child}"\r\n')
+    else:
+        stub = tmp_path / "soffice"
+        stub.write_text(f'#!/bin/sh\n"{sys.executable}" -c "{child}"\n')
+        stub.chmod(0o755)
+    source = tmp_path / "table.csv"
+    source.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    started = time.perf_counter()
+    with pytest.raises(ConversionError, match="timed out"):
+        convert_to_pdf(source, tmp_path / "out.pdf", soffice=stub, timeout=2)
+    assert time.perf_counter() - started < 30  # not the child's 60 s sleep
+
+    child_pid = int(pid_file.read_text())
+    deadline = time.time() + 5
+    while time.time() < deadline and psutil.pid_exists(child_pid):
+        time.sleep(0.1)
+    assert not psutil.pid_exists(child_pid), "the grandchild survived the timeout"
+
+
 @pytest.mark.skipif(find_soffice() is None, reason="LibreOffice not installed")
 def test_office_input_uses_libreoffice(tmp_path):
     source = tmp_path / "table.csv"

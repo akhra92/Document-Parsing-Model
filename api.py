@@ -7,42 +7,93 @@ Interactive docs are then at http://localhost:8000/docs.
 
 Endpoints are declared with ``def`` rather than ``async def`` on purpose: the
 pipeline is blocking (PyMuPDF parsing, a LibreOffice subprocess), so FastAPI
-runs each call in its threadpool instead of stalling the event loop.
+runs each call in its threadpool instead of stalling the event loop. A
+semaphore (``DOCUMENTAI_MAX_CONCURRENCY``) bounds how many of those threads
+convert at once, since each conversion can mean a LibreOffice process.
+
+Settings, all read from the environment at import time:
+
+``DOCUMENTAI_MAX_UPLOAD_BYTES``  per-file size cap (default 50 MiB)
+``DOCUMENTAI_MAX_FILES``         files per request (default 20)
+``DOCUMENTAI_MAX_CONCURRENCY``   simultaneous conversions (default 2)
+``DOCUMENTAI_QUEUE_TIMEOUT``     seconds to wait for a slot before 503 (default 30)
 """
 
 from __future__ import annotations
 
 import io
 import json
+import logging
+import os
 import re
 import tempfile
+import threading
+import uuid
 import zipfile
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import IO, Any
+from typing import IO, Any, TypeVar
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from documentai import DocumentPipeline, __version__, supported_extensions
+from documentai import DocumentPipeline, __version__, markdown_engine, supported_extensions
 from documentai.converters import convert_to_pdf, find_soffice
 from documentai.exceptions import DocumentAIError, ParseError
 from documentai.parsers import OUTPUT_FORMATS, normalize_format
 from documentai.pipeline import safe_stem
 
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB per file
-MAX_FILES = 20
+logger = logging.getLogger("documentai.api")
+
+_Number = TypeVar("_Number", int, float)
+
+
+def _env_number(name: str, default: _Number, *, minimum: _Number) -> _Number:
+    """A numeric setting from the environment, or ``default`` when unset.
+
+    A value that is not a number, or is below ``minimum``, is a configuration
+    error and fails at import so a bad deployment never starts half-working.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = type(default)(raw)
+    except ValueError:
+        raise RuntimeError(f"{name} must be a number, got {raw!r}") from None
+    if value < minimum:
+        raise RuntimeError(f"{name} must be at least {minimum}, got {value}")
+    return value
+
+
+MAX_UPLOAD_BYTES = _env_number("DOCUMENTAI_MAX_UPLOAD_BYTES", 50 * 1024 * 1024, minimum=1)
+MAX_FILES = _env_number("DOCUMENTAI_MAX_FILES", 20, minimum=1)
+MAX_CONCURRENCY = _env_number("DOCUMENTAI_MAX_CONCURRENCY", 2, minimum=1)
+QUEUE_TIMEOUT = _env_number("DOCUMENTAI_QUEUE_TIMEOUT", 30.0, minimum=0.0)
 
 _COPY_CHUNK = 1024 * 1024
+_REQUEST_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 DEFAULT_FORMATS = list(OUTPUT_FORMATS)
+
+#: Conversion slots. Acquired around the pipeline, not around the upload, so
+#: waiting requests hold nothing but their staged files.
+_slots = threading.BoundedSemaphore(MAX_CONCURRENCY)
 
 app = FastAPI(
     title="DocumentAI",
     version=__version__,
     description=(
         "Convert documents to PDF, then extract plain text, Markdown and "
-        "structured JSON. Built on PyMuPDF."
+        "structured JSON. Built on PyMuPDF.\n\n"
+        "Every response carries an `X-Request-ID` header; error bodies repeat "
+        "it as `request_id` - quote it when reporting a problem."
     ),
 )
 
@@ -65,6 +116,129 @@ _STATUS_BY_ERROR_TYPE = {
     "ConversionError": 422,
     "ParseError": 422,
 }
+
+
+# --------------------------------------------------------------------------- #
+# Response models
+# --------------------------------------------------------------------------- #
+
+
+class ErrorResponse(BaseModel):
+    detail: str | list[Any] = Field(description="What went wrong")
+    request_id: str = Field(description="Matches the X-Request-ID response header")
+
+
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+    libreoffice: bool = Field(description="LibreOffice was found, so Office inputs convert")
+    markdown_engine: str = Field(description="Markdown engine in use: layout, legacy or heuristic")
+
+
+class FormatsResponse(BaseModel):
+    inputs: list[str] = Field(description="Accepted input extensions")
+    outputs: list[str] = Field(description="Output format names")
+    office_support: bool
+    max_upload_bytes: int
+    max_files: int
+    max_concurrency: int
+
+
+class DocumentSummary(BaseModel):
+    """One document's outcome, without its content."""
+
+    filename: str = Field(description="Upload name, reduced to a bare safe name")
+    stem: str | None = Field(
+        default=None, description="Name the outputs are filed under; unique within the request"
+    )
+    ok: bool
+    strategy: str | None = Field(default=None, description="passthrough, pymupdf or libreoffice")
+    converted: bool = False
+    page_count: int = 0
+    duration: float = Field(default=0.0, description="Seconds spent on this document")
+    error: str | None = None
+    error_type: str | None = Field(
+        default=None,
+        description=(
+            "Exception class behind the error: UnsupportedFormatError, EmptyUpload, "
+            "UploadTooLarge, ConversionError or ParseError"
+        ),
+    )
+
+
+class DocumentReport(DocumentSummary):
+    """One document's outcome plus its extracted content."""
+
+    outputs: dict[str, str | dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Keyed by format: text and markdown as strings, json as an object",
+    )
+
+
+class ParseResponse(BaseModel):
+    documents: int
+    succeeded: int
+    failed: int
+    results: list[DocumentReport]
+
+
+_ERRORS: dict[int | str, dict[str, Any]] = {
+    413: {"model": ErrorResponse, "description": "Over the size or file-count limit"},
+    415: {"model": ErrorResponse, "description": "Input format not accepted"},
+    422: {"model": ErrorResponse, "description": "Bad request"},
+    503: {"model": ErrorResponse, "description": "All conversion slots busy"},
+}
+
+
+# --------------------------------------------------------------------------- #
+# Request IDs and error bodies
+# --------------------------------------------------------------------------- #
+
+
+def _request_id(request: Request) -> str:
+    rid = getattr(request.state, "request_id", None)
+    if not rid:
+        rid = request.state.request_id = uuid.uuid4().hex[:16]
+    return rid
+
+
+@app.middleware("http")
+async def _tag_request(request: Request, call_next: Any) -> Any:
+    """Give every request an id, honouring a well-formed one the client sent."""
+    incoming = request.headers.get("x-request-id", "")
+    request.state.request_id = (
+        incoming if _REQUEST_ID_RE.fullmatch(incoming) else uuid.uuid4().hex[:16]
+    )
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request.state.request_id
+    return response
+
+
+def _error(
+    request: Request, status: int, detail: Any, headers: Mapping[str, str] | None = None
+) -> JSONResponse:
+    rid = _request_id(request)
+    return JSONResponse(
+        {"detail": detail, "request_id": rid},
+        status_code=status,
+        headers={**(headers or {}), "X-Request-ID": rid},
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    return _error(request, exc.status_code, exc.detail, exc.headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    return _error(request, 422, jsonable_encoder(exc.errors()))
+
+
+@app.exception_handler(Exception)
+async def _unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("request %s failed", _request_id(request))
+    return _error(request, 500, "internal error; quote the request_id when reporting it")
 
 
 # --------------------------------------------------------------------------- #
@@ -91,6 +265,21 @@ def _check_count(uploads: list[UploadFile]) -> None:
 
 def _status_for(error_type: str | None) -> int:
     return _STATUS_BY_ERROR_TYPE.get(error_type or "", 500)
+
+
+@contextmanager
+def _conversion_slot() -> Iterator[None]:
+    """Hold one of the conversion slots, or fail with 503 after the queue timeout."""
+    if not _slots.acquire(timeout=QUEUE_TIMEOUT):
+        raise HTTPException(
+            503,
+            f"all {MAX_CONCURRENCY} conversion slots are busy; retry shortly",
+            headers={"Retry-After": "5"},
+        )
+    try:
+        yield
+    finally:
+        _slots.release()
 
 
 def _safe_filename(raw: str | None) -> str:
@@ -161,24 +350,13 @@ def _stage_uploads(uploads: list[UploadFile], directory: Path) -> list[_Upload]:
     return staged
 
 
-def _payload(name: str, **fields: Any) -> dict[str, Any]:
-    """The per-document response entry, with every key present."""
-    payload: dict[str, Any] = {
-        "filename": name,
-        "stem": None,
-        "ok": False,
-        "strategy": None,
-        "converted": False,
-        "page_count": 0,
-        "duration": 0.0,
-        "error": None,
-        "error_type": None,
-        "outputs": {},
-        "images": {},
-        "pdf": None,
-    }
-    payload.update(fields)
-    return payload
+@dataclass
+class _Processed:
+    """A document's report plus the binary outputs that only ``/bundle`` ships."""
+
+    report: DocumentReport
+    images: dict[str, bytes]
+    pdf: bytes | None
 
 
 def _process(
@@ -188,13 +366,13 @@ def _process(
     spans: bool = True,
     images: bool = False,
     keep_pdf: bool = False,
-) -> list[dict[str, Any]]:
+) -> list[_Processed]:
     """Run every upload through the pipeline, reading results into memory.
 
     The working directory is deleted before returning, so the response never
     depends on files that still exist on disk.
     """
-    payloads: list[dict[str, Any]] = []
+    processed: list[_Processed] = []
     with tempfile.TemporaryDirectory(prefix="documentai-api-") as tmp:
         tmp_path = Path(tmp)
         staged = _stage_uploads(uploads, tmp_path / "input")
@@ -205,35 +383,40 @@ def _process(
             spans=spans,
             keep_pdf=keep_pdf,
         )
-        for entry in staged:
-            if entry.path is None:
-                payloads.append(
-                    _payload(entry.name, error=entry.error, error_type=entry.error_type)
-                )
-                continue
+        with _conversion_slot():
+            for entry in staged:
+                if entry.path is None:
+                    report = DocumentReport(
+                        filename=entry.name, ok=False,
+                        error=entry.error, error_type=entry.error_type,
+                    )
+                    processed.append(_Processed(report, {}, None))
+                    continue
 
-            result = pipeline.run(entry.path)
-            payload = _payload(
-                entry.name,
-                stem=result.stem,
-                ok=result.ok,
-                strategy=result.strategy or None,
-                converted=result.converted,
-                page_count=result.page_count,
-                duration=round(result.duration, 3),
-                error=result.error or None,
-                error_type=result.error_type or None,
-            )
-            if result.ok:
-                for fmt, path in result.outputs.items():
-                    content = path.read_text(encoding="utf-8")
-                    # Hand JSON back as a real object, not a quoted string.
-                    payload["outputs"][fmt] = json.loads(content) if fmt == "json" else content
-                payload["images"] = {img.name: img.read_bytes() for img in result.images}
-                if keep_pdf and result.pdf:
-                    payload["pdf"] = result.pdf.read_bytes()
-            payloads.append(payload)
-    return payloads
+                result = pipeline.run(entry.path)
+                report = DocumentReport(
+                    filename=entry.name,
+                    stem=result.stem,
+                    ok=result.ok,
+                    strategy=result.strategy or None,
+                    converted=result.converted,
+                    page_count=result.page_count,
+                    duration=round(result.duration, 3),
+                    error=result.error or None,
+                    error_type=result.error_type or None,
+                )
+                image_blobs: dict[str, bytes] = {}
+                pdf_bytes: bytes | None = None
+                if result.ok:
+                    for fmt, path in result.outputs.items():
+                        content = path.read_text(encoding="utf-8")
+                        # Hand JSON back as a real object, not a quoted string.
+                        report.outputs[fmt] = json.loads(content) if fmt == "json" else content
+                    image_blobs = {img.name: img.read_bytes() for img in result.images}
+                    if keep_pdf and result.pdf:
+                        pdf_bytes = result.pdf.read_bytes()
+                processed.append(_Processed(report, image_blobs, pdf_bytes))
+    return processed
 
 
 # --------------------------------------------------------------------------- #
@@ -241,28 +424,39 @@ def _process(
 # --------------------------------------------------------------------------- #
 
 
-@app.get("/health", summary="Liveness probe")
-def health() -> dict:
-    return {
-        "status": "ok",
-        "version": __version__,
-        "libreoffice": find_soffice() is not None,
-    }
+@app.get("/health", summary="Liveness probe", response_model=HealthResponse)
+def health() -> HealthResponse:
+    return HealthResponse(
+        status="ok",
+        version=__version__,
+        libreoffice=find_soffice() is not None,
+        markdown_engine=markdown_engine(),
+    )
 
 
-@app.get("/formats", summary="What this deployment accepts and produces")
-def formats() -> dict:
+@app.get(
+    "/formats",
+    summary="What this deployment accepts and produces",
+    response_model=FormatsResponse,
+)
+def formats() -> FormatsResponse:
     """Office inputs need LibreOffice, so report whether it is available."""
-    return {
-        "inputs": supported_extensions(),
-        "outputs": list(OUTPUT_FORMATS),
-        "office_support": find_soffice() is not None,
-        "max_upload_bytes": MAX_UPLOAD_BYTES,
-        "max_files": MAX_FILES,
-    }
+    return FormatsResponse(
+        inputs=supported_extensions(),
+        outputs=list(OUTPUT_FORMATS),
+        office_support=find_soffice() is not None,
+        max_upload_bytes=MAX_UPLOAD_BYTES,
+        max_files=MAX_FILES,
+        max_concurrency=MAX_CONCURRENCY,
+    )
 
 
-@app.post("/parse", summary="Extract text, Markdown and JSON from documents")
+@app.post(
+    "/parse",
+    summary="Extract text, Markdown and JSON from documents",
+    response_model=ParseResponse,
+    responses={k: v for k, v in _ERRORS.items() if k != 415},
+)
 def parse(
     files: list[UploadFile] = File(..., description="One or more documents"),
     formats: list[str] = Query(
@@ -270,7 +464,7 @@ def parse(
         description="Any of: text, markdown, json (aliases: txt, md)",
     ),
     spans: bool = Query(True, description="Keep per-span font detail in the JSON"),
-) -> dict:
+) -> ParseResponse:
     """Convert each upload to PDF if needed, then return the extractions inline.
 
     A file that fails - unsupported, empty, over the size limit, or broken - is
@@ -279,21 +473,23 @@ def parse(
     """
     _check_count(files)
     wanted = _validate_formats(formats)
-    results = _process(files, wanted, spans=spans)
+    processed = _process(files, wanted, spans=spans)
+    reports = [item.report for item in processed]
 
-    for payload in results:  # image bytes are not JSON-serialisable
-        payload.pop("images", None)
-        payload.pop("pdf", None)
-
-    return {
-        "documents": len(results),
-        "succeeded": sum(1 for r in results if r["ok"]),
-        "failed": sum(1 for r in results if not r["ok"]),
-        "results": results,
-    }
+    return ParseResponse(
+        documents=len(reports),
+        succeeded=sum(1 for r in reports if r.ok),
+        failed=sum(1 for r in reports if not r.ok),
+        results=reports,
+    )
 
 
-@app.post("/convert", summary="Convert one document to PDF")
+@app.post(
+    "/convert",
+    summary="Convert one document to PDF",
+    response_class=StreamingResponse,
+    responses={200: {"content": {"application/pdf": {}}}, **_ERRORS},
+)
 def convert(file: UploadFile = File(..., description="A single document")) -> StreamingResponse:
     """Return the intermediate PDF itself, without parsing it.
 
@@ -307,10 +503,11 @@ def convert(file: UploadFile = File(..., description="A single document")) -> St
             raise HTTPException(_status_for(entry.error_type), entry.error)
 
         stem = safe_stem(PurePosixPath(entry.name).stem)
-        try:
-            conversion = convert_to_pdf(entry.path, tmp_path / "output" / f"{stem}.pdf")
-        except DocumentAIError as exc:
-            raise HTTPException(_status_for(type(exc).__name__), str(exc)) from exc
+        with _conversion_slot():
+            try:
+                conversion = convert_to_pdf(entry.path, tmp_path / "output" / f"{stem}.pdf")
+            except DocumentAIError as exc:
+                raise HTTPException(_status_for(type(exc).__name__), str(exc)) from exc
         pdf_bytes = conversion.pdf.read_bytes()
 
     return StreamingResponse(
@@ -320,45 +517,52 @@ def convert(file: UploadFile = File(..., description="A single document")) -> St
     )
 
 
-@app.post("/bundle", summary="Extract and download everything as a ZIP")
+@app.post(
+    "/bundle",
+    summary="Extract and download everything as a ZIP",
+    response_class=StreamingResponse,
+    responses={200: {"content": {"application/zip": {}}}, **_ERRORS},
+)
 def bundle(
     files: list[UploadFile] = File(..., description="One or more documents"),
     formats: list[str] = Query(default=DEFAULT_FORMATS),
     spans: bool = Query(True),
-    images: bool = Query(False, description="Include embedded images (needs markdown)"),
+    images: bool = Query(False, description="Include embedded images (requires markdown)"),
     keep_pdf: bool = Query(False, description="Include the intermediate PDF"),
 ) -> StreamingResponse:
     """Same work as ``/parse``, delivered as a ZIP of the output files.
 
     Entries are named by each document's ``stem``, which the pipeline keeps
-    unique, so ``a.pdf`` and ``a.docx`` land as ``a.*`` and ``a_1.*``.
+    unique, so ``a.pdf`` and ``a.docx`` land as ``a.*`` and ``a_1.*``. The
+    ZIP also holds a ``manifest.json`` listing every document's outcome.
     """
     _check_count(files)
     wanted = _validate_formats(formats)
-    results = _process(files, wanted, spans=spans, images=images, keep_pdf=keep_pdf)
+    if images and "markdown" not in wanted:
+        raise HTTPException(
+            422, "images=true requires the markdown format (images are extracted with it)"
+        )
+    processed = _process(files, wanted, spans=spans, images=images, keep_pdf=keep_pdf)
 
-    if not any(payload["ok"] for payload in results):
-        first = next(p for p in results if p["error"])
-        raise HTTPException(_status_for(first["error_type"]), first["error"])
+    if not any(item.report.ok for item in processed):
+        first = next(item.report for item in processed if item.report.error)
+        raise HTTPException(_status_for(first.error_type), first.error)
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        for payload in results:
-            if not payload["ok"]:
+        for item in processed:
+            report = item.report
+            if not report.ok:
                 continue
-            stem = payload["stem"]
-            for fmt, content in payload["outputs"].items():
-                text = json.dumps(content, indent=2) if fmt == "json" else content
-                archive.writestr(f"{stem}{OUTPUT_FORMATS[fmt]}", text)
-            for name, blob in payload["images"].items():
-                archive.writestr(f"images/{stem}/{name}", blob)
-            if payload["pdf"]:
-                archive.writestr(f"pdf/{stem}.pdf", payload["pdf"])
-        manifest_keys = ("filename", "stem", "ok", "strategy", "page_count", "error", "error_type")
-        archive.writestr(
-            "manifest.json",
-            json.dumps([{k: p[k] for k in manifest_keys} for p in results], indent=2),
-        )
+            for fmt, content in report.outputs.items():
+                text = content if isinstance(content, str) else json.dumps(content, indent=2)
+                archive.writestr(f"{report.stem}{OUTPUT_FORMATS[fmt]}", text)
+            for name, blob in item.images.items():
+                archive.writestr(f"images/{report.stem}/{name}", blob)
+            if item.pdf:
+                archive.writestr(f"pdf/{report.stem}.pdf", item.pdf)
+        manifest = [item.report.model_dump(exclude={"outputs"}) for item in processed]
+        archive.writestr("manifest.json", json.dumps(manifest, indent=2))
 
     buffer.seek(0)
     return StreamingResponse(

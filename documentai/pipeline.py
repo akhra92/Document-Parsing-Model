@@ -84,6 +84,10 @@ class DocumentPipeline:
         self.formats = [normalize_format(f) for f in formats]
         if not self.formats:
             raise ValueError("at least one output format is required")
+        if extract_images and "markdown" not in self.formats:
+            # Images are written as a side effect of Markdown extraction, so
+            # without it the option would silently do nothing.
+            raise ValueError("extract_images requires the markdown format")
         self.keep_pdf = keep_pdf
         self.extract_images = extract_images
         self.spans = spans

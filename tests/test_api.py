@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import zipfile
 
 import pytest
@@ -30,14 +31,113 @@ def test_health(client):
 
     assert body["status"] == "ok"
     assert isinstance(body["libreoffice"], bool)
+    assert body["markdown_engine"] == "layout"
 
 
-def test_formats_lists_inputs_and_outputs(client):
+def test_formats_lists_inputs_outputs_and_limits(client):
     body = client.get("/formats").json()
 
     assert ".pdf" in body["inputs"] and ".docx" in body["inputs"]
     assert ".md" not in body["inputs"]  # already-extracted formats are not inputs
     assert body["outputs"] == ["text", "markdown", "json"]
+    assert body["max_files"] == MAX_FILES and body["max_concurrency"] >= 1
+
+
+def test_settings_come_from_the_environment(monkeypatch):
+    from api import _env_number
+
+    monkeypatch.delenv("DOCUMENTAI_MAX_FILES", raising=False)
+    assert _env_number("DOCUMENTAI_MAX_FILES", 20, minimum=1) == 20
+
+    monkeypatch.setenv("DOCUMENTAI_MAX_FILES", "3")
+    assert _env_number("DOCUMENTAI_MAX_FILES", 20, minimum=1) == 3
+    monkeypatch.setenv("DOCUMENTAI_QUEUE_TIMEOUT", "0")
+    assert _env_number("DOCUMENTAI_QUEUE_TIMEOUT", 30.0, minimum=0.0) == 0.0
+
+    # A bad value must stop the service from starting, not be silently ignored.
+    monkeypatch.setenv("DOCUMENTAI_MAX_FILES", "many")
+    with pytest.raises(RuntimeError, match="must be a number"):
+        _env_number("DOCUMENTAI_MAX_FILES", 20, minimum=1)
+    monkeypatch.setenv("DOCUMENTAI_MAX_FILES", "0")
+    with pytest.raises(RuntimeError, match="at least 1"):
+        _env_number("DOCUMENTAI_MAX_FILES", 20, minimum=1)
+
+
+def test_every_response_carries_a_request_id(client, sample_pdf):
+    fresh = client.get("/health")
+    assert re.fullmatch(r"[0-9a-f]{16}", fresh.headers["x-request-id"])
+
+    echoed = client.get("/health", headers={"X-Request-ID": "trace-42"})
+    assert echoed.headers["x-request-id"] == "trace-42"
+    junk = client.get("/health", headers={"X-Request-ID": "x" * 100})
+    assert junk.headers["x-request-id"] != "x" * 100  # malformed ids are replaced
+
+    # Error bodies repeat the id, whichever layer produced them.
+    ours = client.post("/parse?formats=nope", files=_upload(sample_pdf))
+    assert ours.status_code == 422
+    assert ours.json()["request_id"] == ours.headers["x-request-id"]
+    validation = client.post("/parse")  # FastAPI's own 422 for the missing files
+    assert validation.status_code == 422 and "request_id" in validation.json()
+    routing = client.get("/no-such-route")
+    assert routing.status_code == 404 and "request_id" in routing.json()
+
+
+def test_unexpected_errors_return_500_with_a_request_id(sample_pdf, monkeypatch):
+    import api
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(api, "_process", boom)
+    with TestClient(app, raise_server_exceptions=False) as quiet_client:
+        response = quiet_client.post("/parse", files=_upload(sample_pdf))
+
+    assert response.status_code == 500
+    body = response.json()
+    assert "kaboom" not in body["detail"]  # internals stay out of the response
+    assert body["request_id"] == response.headers["x-request-id"]
+
+
+def test_busy_server_returns_503_then_recovers(client, sample_pdf, monkeypatch):
+    import threading
+
+    import api
+
+    monkeypatch.setattr(api, "_slots", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(api, "QUEUE_TIMEOUT", 0.05)
+
+    api._slots.acquire()  # someone else is converting
+    try:
+        busy = client.post("/parse?formats=text", files=_upload(sample_pdf))
+    finally:
+        api._slots.release()
+
+    assert busy.status_code == 503
+    assert busy.headers["retry-after"] == "5"
+    assert "busy" in busy.json()["detail"]
+    assert client.post("/parse?formats=text", files=_upload(sample_pdf)).status_code == 200
+
+
+def test_bundle_rejects_images_without_markdown(client, sample_pdf):
+    response = client.post("/bundle?formats=text&images=true", files=_upload(sample_pdf))
+
+    assert response.status_code == 422
+    assert "markdown" in response.json()["detail"]
+
+
+def test_openapi_schema_is_typed(client):
+    schema = client.get("/openapi.json").json()
+    components = schema["components"]["schemas"]
+
+    parse_ok = schema["paths"]["/parse"]["post"]["responses"]["200"]
+    assert parse_ok["content"]["application/json"]["schema"]["$ref"].endswith("/ParseResponse")
+    report = components["DocumentReport"]["properties"]
+    assert {"filename", "stem", "ok", "error", "error_type", "outputs"} <= set(report)
+    assert {"detail", "request_id"} <= set(components["ErrorResponse"]["properties"])
+
+    convert_ok = schema["paths"]["/convert"]["post"]["responses"]["200"]
+    assert "application/pdf" in convert_ok["content"]
+    assert "503" in schema["paths"]["/bundle"]["post"]["responses"]
 
 
 def test_parse_returns_every_format_inline(client, sample_pdf):

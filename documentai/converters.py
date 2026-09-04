@@ -14,6 +14,7 @@ the source itself defines. None of them invent structure - see
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -21,6 +22,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import psutil
 import pymupdf
 
 from .exceptions import ConversionError, UnsupportedFormatError
@@ -153,9 +155,7 @@ def _office_to_pdf(
             str(source),
         ]
         try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout, check=False
-            )
+            proc = _run_capped(cmd, timeout)
         except subprocess.TimeoutExpired as exc:
             raise ConversionError(
                 f"LibreOffice timed out after {timeout}s converting {source.name}"
@@ -172,6 +172,40 @@ def _office_to_pdf(
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+
+
+def _run_capped(cmd: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run`` with a timeout that takes the whole process tree down.
+
+    ``soffice`` is a launcher: on Windows ``soffice.exe`` starts ``soffice.bin``
+    and on Linux a shell wrapper does the same, so killing only the process we
+    started would leave the real converter running - and, worse, holding the
+    profile directory we are about to delete. On timeout every descendant is
+    killed first, then the launcher, and ``TimeoutExpired`` is re-raised.
+    """
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc.pid)
+        proc.communicate()  # reap, and release the pipes
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+def _kill_process_tree(pid: int) -> None:
+    """Kill ``pid`` and every process descended from it, children first."""
+    try:
+        parent = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+    processes = [*parent.children(recursive=True), parent]
+    for process in processes:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            process.kill()
+    psutil.wait_procs(processes, timeout=5)
 
 
 def find_soffice(explicit: str | Path | None = None) -> Path | None:

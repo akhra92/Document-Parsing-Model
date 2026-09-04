@@ -117,14 +117,16 @@ def sidebar() -> dict:
         )
         # Images are written while extracting Markdown, so the option is moot
         # without it; JSON font detail is likewise moot without JSON.
+        # A disabled checkbox keeps its last value, so guard the setting too.
+        extract_images = st.checkbox(
+            "Extract embedded images", value=False,
+            disabled="markdown" not in formats,
+            help="Writes the images alongside the Markdown, which links to them. "
+                 "Requires the markdown format.",
+        )
         settings = {
             "formats": formats,
-            "extract_images": st.checkbox(
-                "Extract embedded images", value=False,
-                disabled="markdown" not in formats,
-                help="Writes the images alongside the Markdown, which links to them. "
-                     "Requires the markdown format.",
-            ),
+            "extract_images": extract_images and "markdown" in formats,
             "spans": st.checkbox(
                 "Font detail in JSON", value=True,
                 disabled="json" not in formats,

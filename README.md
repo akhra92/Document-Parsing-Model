@@ -49,8 +49,8 @@ Interactive docs (Swagger UI) at `http://localhost:8000/docs`.
 
 | Endpoint | Does |
 | --- | --- |
-| `GET /health` | liveness, version, whether LibreOffice is available |
-| `GET /formats` | accepted inputs, available outputs, size limits |
+| `GET /health` | liveness, version, whether LibreOffice is available, Markdown engine |
+| `GET /formats` | accepted inputs, available outputs, size and concurrency limits |
 | `POST /parse` | upload documents → extractions returned inline as JSON |
 | `POST /convert` | upload one document → the PDF itself |
 | `POST /bundle` | upload documents → a ZIP of the outputs, plus a manifest |
@@ -96,11 +96,60 @@ status: **415** for an input format the pipeline does not accept, **413** for
 an upload over the size limit, **422** for an empty upload or a conversion or
 parse failure.
 
-Uploads are capped at 50 MB and 20 files per request (`MAX_UPLOAD_BYTES` and
-`MAX_FILES` in `api.py`). Every upload is copied to disk in chunks and cut off
-as soon as it passes the cap, so an oversized body is never held in memory.
-Filenames are reduced to a bare, safe name before use. Each request works in a
-temporary directory that is deleted before the response is sent.
+`/bundle?images=true` requires the `markdown` format, because the images are
+written while the Markdown is extracted; asking for them without it is a 422
+rather than a silent no-op. The same rule applies to the CLI's `--images` and
+to `DocumentPipeline(extract_images=True)`.
+
+### Settings
+
+Everything is read from the environment when the service starts. A value that
+is not a number, or is out of range, stops the service from starting.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `DOCUMENTAI_MAX_UPLOAD_BYTES` | `52428800` (50 MiB) | per-file size cap |
+| `DOCUMENTAI_MAX_FILES` | `20` | files per request |
+| `DOCUMENTAI_MAX_CONCURRENCY` | `2` | conversions running at once |
+| `DOCUMENTAI_QUEUE_TIMEOUT` | `30` | seconds a request waits for a free slot before **503** |
+
+Every upload is copied to disk in chunks and cut off as soon as it passes the
+cap, so an oversized body is never held in memory. Filenames are reduced to a
+bare, safe name before use. Each request works in a temporary directory that
+is deleted before the response is sent.
+
+Conversions are the expensive part - each Office document means a LibreOffice
+process of a few hundred megabytes - so only `DOCUMENTAI_MAX_CONCURRENCY` of
+them run at once. Further requests queue for up to `DOCUMENTAI_QUEUE_TIMEOUT`
+seconds, then get a **503** with a `Retry-After` header. `GET /formats`
+reports the limits in force.
+
+### Request IDs
+
+Every response carries an `X-Request-ID` header, and every error body repeats
+it as `request_id` - including FastAPI's own validation errors and unexpected
+500s, whose bodies say only that something went wrong. Quote the id when
+reporting a problem; the server log line for the failure carries the same id.
+A client may supply its own `X-Request-ID` (up to 64 characters of letters,
+digits, `.`, `_` and `-`) and it is echoed back, which makes tracing across
+services easy.
+
+### Running in Docker
+
+The `Dockerfile` builds the API with LibreOffice and fonts, running as an
+unprivileged user with a health check on `/health`:
+
+```bash
+docker compose up --build          # http://localhost:8000/docs
+# or without compose
+docker build -t documentai-api .
+docker run --rm -p 8000:8000 -e DOCUMENTAI_MAX_CONCURRENCY=4 documentai-api
+```
+
+`docker-compose.yml` sets the environment variables above, a 2 GB memory
+limit and a tmpfs for the working directory. Keep the concurrency in step with
+the memory limit. The image installs the same apt packages Streamlit Community
+Cloud does (`packages.txt`), so both deployments convert Office files alike.
 
 ## Web app
 
@@ -156,11 +205,11 @@ Equivalent module form: `python -m documentai ...`
 | `-f, --formats` | any of `text` `markdown` `json` (aliases `txt` `md`) |
 | `-r, --recursive` | descend into subdirectories of directory inputs |
 | `--keep-pdf` | keep the intermediate PDF under `OUTPUT/pdf/` |
-| `--images` | write embedded images to `OUTPUT/images/<stem>/` and link them from the Markdown |
+| `--images` | write embedded images to `OUTPUT/images/<stem>/` and link them from the Markdown (requires the `markdown` format) |
 | `--no-spans` | drop the per-span font detail from the JSON (much smaller files) |
 | `--manifest [PATH]` | JSON summary of the run |
 | `--soffice PATH` | LibreOffice executable for Office inputs |
-| `--timeout SEC` | per-document LibreOffice timeout (default 180) |
+| `--timeout SEC` | per-document LibreOffice timeout (default 180); on expiry the whole LibreOffice process tree is killed, not just the launcher |
 | `--no-overwrite` | fail instead of replacing existing outputs (checked before any work, and covering the kept PDF and images too) |
 
 Exit code is `0` when every document succeeded, `1` when any failed, `2` on a
@@ -333,6 +382,7 @@ with LibreOffice installed, so nothing is skipped there.
 
 ```
 api.py              FastAPI HTTP service
+Dockerfile          the API with LibreOffice, for docker compose up
 app.py              Streamlit web front end
 documentai/
 ├── formats.py      input extension → conversion strategy registry

@@ -142,6 +142,17 @@ def test_cli_returns_nonzero_on_failure(tmp_path, capsys):
     assert "FAIL" in capsys.readouterr().err
 
 
+def test_images_require_the_markdown_format(tmp_path, sample_pdf):
+    """Images are written while extracting Markdown, so asking for them
+    without it is refused rather than silently doing nothing."""
+    with pytest.raises(ValueError, match="markdown"):
+        DocumentPipeline(tmp_path / "out", formats=["text"], extract_images=True)
+
+    code = main([str(sample_pdf), "-o", str(tmp_path / "out"), "-f", "text", "--images"])
+    assert code == 2  # usage error, before any document is touched
+    assert not (tmp_path / "out" / "sample.txt").exists()
+
+
 def test_result_carries_stem_and_error_type(tmp_path, sample_pdf):
     pipeline = DocumentPipeline(tmp_path / "out", formats=["text"])
     bad = tmp_path / "mystery.zzz"

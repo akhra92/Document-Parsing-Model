@@ -1,0 +1,23 @@
+# Local run of the HTTP API:  docker compose up --build
+services:
+  api:
+    build: .
+    image: documentai-api
+    ports:
+      - "8000:8000"
+    environment:
+      # Each conversion can spawn a LibreOffice process (~300 MB); keep the
+      # slot count in step with the memory limit below.
+      DOCUMENTAI_MAX_CONCURRENCY: "2"
+      DOCUMENTAI_QUEUE_TIMEOUT: "30"
+      DOCUMENTAI_MAX_UPLOAD_BYTES: "52428800"
+      DOCUMENTAI_MAX_FILES: "20"
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    # Conversions work in the container's temp directory; keep it off the
+    # image layer and out of persistent storage.
+    tmpfs:
+      - /tmp:size=1g
+    restart: unless-stopped
