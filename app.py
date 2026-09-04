@@ -15,7 +15,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from documentai import DocumentPipeline, supported_extensions
+from documentai import DocumentPipeline, supported_extensions, unique_stems
 from documentai.converters import find_soffice
 from documentai.formats import OFFICE_EXTS
 from documentai.parsers import OUTPUT_FORMATS
@@ -36,11 +36,14 @@ def process(
     extract_images: bool,
     spans: bool,
     keep_pdf: bool,
+    stem: str | None = None,
 ) -> dict:
     """Run one uploaded file through the pipeline, returning everything in memory.
 
     Cached on the arguments, so re-rendering the page (a download click, a tab
-    switch) never re-converts a document.
+    switch) never re-converts a document. ``stem`` names the outputs; the
+    caller keeps it unique across the batch (see :func:`unique_stems`) because
+    every call here runs its own pipeline.
     """
     with tempfile.TemporaryDirectory(prefix="documentai-app-") as tmp:
         tmp_path = Path(tmp)
@@ -55,10 +58,11 @@ def process(
             spans=spans,
             keep_pdf=keep_pdf,
         )
-        result = pipeline.run(source)
+        result = pipeline.run(source, stem=stem)
 
         payload = {
             "name": filename,
+            "stem": result.stem,
             "ok": result.ok,
             "error": result.error,
             "strategy": result.strategy,
@@ -86,7 +90,7 @@ def build_zip(payloads: list[dict]) -> bytes:
         for payload in payloads:
             if not payload["ok"]:
                 continue
-            stem = Path(payload["name"]).stem
+            stem = payload["stem"]
             for fmt, content in payload["outputs"].items():
                 archive.writestr(f"{stem}{OUTPUT_FORMATS[fmt]}", content)
             for name, blob in payload["images"].items():
@@ -150,7 +154,7 @@ def sidebar() -> dict:
 
 def show_document(payload: dict) -> None:
     """Metrics, previews and download buttons for one processed document."""
-    stem = Path(payload["name"]).stem
+    stem = payload["stem"]  # unique per document, so widget keys never collide
     left, middle, right = st.columns(3)
     left.metric("Pages", payload["page_count"])
     middle.metric(
@@ -222,7 +226,10 @@ def main() -> None:
 
     payloads = []
     progress = st.progress(0.0, text="Processing…")
-    for index, upload in enumerate(uploads):
+    # Each upload is processed (and cached) on its own, so distinct output
+    # names for e.g. report.pdf + report.docx have to be decided here.
+    stems = unique_stems([upload.name for upload in uploads])
+    for index, (upload, stem) in enumerate(zip(uploads, stems, strict=True)):
         progress.progress(index / len(uploads), text=f"Processing {upload.name}…")
         payloads.append(
             process(
@@ -232,6 +239,7 @@ def main() -> None:
                 settings["extract_images"],
                 settings["spans"],
                 settings["keep_pdf"],
+                stem=stem,
             )
         )
     progress.empty()

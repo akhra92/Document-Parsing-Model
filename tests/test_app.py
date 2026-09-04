@@ -84,3 +84,45 @@ def test_zip_bundles_every_output(app_module, sample_pdf, illustrated_pdf):
         assert "illustrated.txt" in names
         assert any(name.startswith("images/illustrated/") for name in names)
         assert "Heading 1" in archive.read("sample.txt").decode("utf-8")
+
+
+def test_same_stem_uploads_bundle_apart(app_module, sample_pdf, sample_png):
+    from documentai import unique_stems
+
+    stems = unique_stems(["figure.pdf", "figure.png"])
+    assert stems == ["figure", "figure_1"]
+
+    payloads = [
+        app_module.process(
+            "figure.pdf", sample_pdf.read_bytes(), ("text",), False, True, False, stem=stems[0]
+        ),
+        app_module.process(
+            "figure.png", sample_png.read_bytes(), ("text",), False, True, False, stem=stems[1]
+        ),
+    ]
+
+    assert [p["stem"] for p in payloads] == stems
+    with zipfile.ZipFile(io.BytesIO(app_module.build_zip(payloads))) as archive:
+        assert sorted(archive.namelist()) == ["figure.txt", "figure_1.txt"]
+
+
+def test_same_stem_uploads_render_without_duplicate_keys(sample_pdf, sample_png):
+    """Widget keys derive from the stem, so two documents that share a filename
+    stem must not raise StreamlitDuplicateElementKey."""
+    script = f"""
+import sys
+sys.path.insert(0, {str(Path(APP).parent)!r})
+from pathlib import Path
+import app
+
+uploads = [
+    ("figure.pdf", Path({str(sample_pdf)!r}).read_bytes(), "figure"),
+    ("figure.png", Path({str(sample_png)!r}).read_bytes(), "figure_1"),
+]
+for name, data, stem in uploads:
+    app.show_document(app.process(name, data, ("text",), False, True, False, stem=stem))
+"""
+    at = AppTest.from_string(script, default_timeout=60).run()
+
+    assert not at.exception, at.exception[0].value
+    assert len(at.subheader) == 2

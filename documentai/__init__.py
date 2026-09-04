@@ -33,7 +33,14 @@ from .parsers import (
     markdown_engine,
     parse_pdf,
 )
-from .pipeline import DocumentPipeline, DocumentResult, collect_inputs, write_manifest
+from .pipeline import (
+    DocumentPipeline,
+    DocumentResult,
+    collect_inputs,
+    safe_stem,
+    unique_stems,
+    write_manifest,
+)
 
 __all__ = [
     "MARKDOWN_ENGINE",
@@ -56,6 +63,8 @@ __all__ = [
     "is_supported",
     "markdown_engine",
     "parse_pdf",
+    "safe_stem",
     "supported_extensions",
+    "unique_stems",
     "write_manifest",
 ]

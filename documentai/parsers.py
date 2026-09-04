@@ -137,11 +137,13 @@ def extract(pdf_path: str | Path, fmt: str, **kwargs) -> str:
 
 
 def extract_text(doc: pymupdf.Document, *, sort: bool = True) -> str:
-    """Plain text, one form feed (``\\f``) between pages."""
-    pages = []
-    for page in doc.pages():
-        pages.append(page.get_text("text", sort=sort).rstrip())
-    return (_PAGE_BREAK + "\n").join(pages).rstrip() + "\n"
+    """Plain text, one form feed (``\\f``) between pages.
+
+    An N-page document always holds N-1 form feeds, so empty trailing pages
+    (a blank back cover, say) still count.
+    """
+    pages = [page.get_text("text", sort=sort).rstrip() for page in doc.pages()]
+    return (_PAGE_BREAK + "\n").join(pages) + "\n"
 
 
 def extract_json(

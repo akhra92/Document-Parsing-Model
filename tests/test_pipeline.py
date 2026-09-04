@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from documentai import pipeline as pipeline_module
 from documentai.cli import main
-from documentai.pipeline import DocumentPipeline, collect_inputs, write_manifest
+from documentai.pipeline import (
+    DocumentPipeline,
+    collect_inputs,
+    safe_stem,
+    unique_stems,
+    write_manifest,
+)
 
 
 def test_pipeline_writes_all_three_formats(sample_pdf, tmp_path):
@@ -132,3 +140,62 @@ def test_cli_returns_nonzero_on_failure(tmp_path, capsys):
     bad.write_bytes(b"x")
     assert main([str(bad), "-o", str(tmp_path / "out")]) == 1
     assert "FAIL" in capsys.readouterr().err
+
+
+def test_result_carries_stem_and_error_type(tmp_path, sample_pdf):
+    pipeline = DocumentPipeline(tmp_path / "out", formats=["text"])
+    bad = tmp_path / "mystery.zzz"
+    bad.write_bytes(b"x")
+
+    good, failed = pipeline.run(sample_pdf), pipeline.run(bad)
+
+    assert good.stem == "sample" and good.error_type == ""
+    assert failed.stem == "mystery" and failed.error_type == "UnsupportedFormatError"
+    assert good.to_dict()["stem"] == "sample" and "error_type" in failed.to_dict()
+
+
+def test_run_accepts_an_explicit_stem(tmp_path, sample_pdf):
+    result = DocumentPipeline(tmp_path / "out", formats=["text"]).run(sample_pdf, stem="renamed")
+
+    assert result.ok, result.error
+    assert result.stem == "renamed"
+    assert result.outputs["text"].name == "renamed.txt"
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("report", "report"),
+        ("Q3 (final)", "Q3 _final_"),
+        ("v1.2", "v1.2"),
+        ("..", "document"),
+        (" .hidden. ", "hidden"),
+        ("", "document"),
+    ],
+)
+def test_safe_stem(raw, expected):
+    assert safe_stem(raw) == expected
+
+
+def test_unique_stems_keeps_a_batch_apart():
+    assert unique_stems(["a.pdf", "a.docx", "A.png", "b.pdf"]) == ["a", "a_1", "A_2", "b"]
+
+
+def test_no_overwrite_leaves_every_existing_output_untouched(illustrated_pdf, tmp_path):
+    out = tmp_path / "out"
+    options = {"formats": ["markdown"], "extract_images": True, "keep_pdf": True}
+    first = DocumentPipeline(out, **options).run(illustrated_pdf)
+    assert first.ok, first.error
+    written = [first.pdf, first.outputs["markdown"], *first.images]
+    before = {path: path.stat().st_mtime_ns for path in written}
+
+    second = DocumentPipeline(out, overwrite=False, **options).run(illustrated_pdf)
+
+    assert second.ok is False and "already exists" in second.error
+    assert second.strategy == ""  # refused before any conversion work started
+    assert {path: path.stat().st_mtime_ns for path in written} == before
+
+    # The kept PDF or the images alone are enough to refuse, not just the text outputs.
+    first.outputs["markdown"].unlink()
+    third = DocumentPipeline(out, overwrite=False, **options).run(illustrated_pdf)
+    assert third.ok is False and "already exists" in third.error

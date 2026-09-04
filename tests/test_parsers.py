@@ -119,6 +119,22 @@ def test_format_aliases():
         normalize_format("html")
 
 
+def test_text_keeps_a_form_feed_for_a_trailing_empty_page(tmp_path):
+    import pymupdf
+
+    path = tmp_path / "trailing.pdf"
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 90), "Only page with text", fontsize=11)
+    doc.new_page()  # a blank back page
+    doc.save(path)
+    doc.close()
+
+    text = extract(path, "text")
+
+    assert text.count("\f") == 1  # still one break per page boundary
+    assert text.startswith("Only page with text")
+
+
 def test_broken_pdf_raises(tmp_path):
     broken = tmp_path / "broken.pdf"
     broken.write_bytes(b"not really a pdf")

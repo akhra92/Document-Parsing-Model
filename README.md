@@ -65,29 +65,42 @@ curl -X POST "http://localhost:8000/bundle?images=true&keep_pdf=true" \
 ```
 
 `/parse` returns each document separately, so one bad file never fails the
-batch — it comes back with `"ok": false` and an `error`, and the response is
-still 200:
+batch — whether it is unsupported, empty, over the size limit or simply broken,
+it comes back with `"ok": false`, an `error` and an `error_type`, and the
+response is still 200:
 
 ```jsonc
 {
   "documents": 2, "succeeded": 1, "failed": 1,
   "results": [
-    { "filename": "report.docx", "ok": true, "strategy": "libreoffice",
-      "page_count": 3, "duration": 3.28,
+    { "filename": "report.docx", "stem": "report", "ok": true,
+      "strategy": "libreoffice", "page_count": 3, "duration": 3.28,
       "outputs": { "markdown": "# Quarterly Report…" } },
-    { "filename": "notes.html", "ok": false,
-      "error": "no conversion strategy for '.html' (notes.html)" }
+    { "filename": "notes.html", "stem": "notes", "ok": false,
+      "error": "no conversion strategy for '.html' (notes.html)",
+      "error_type": "UnsupportedFormatError" }
   ]
 }
 ```
 
-JSON output is embedded as a real object, not a quoted string. Status codes:
-**415** for an input format the pipeline does not accept, **413** over the size
-or file-count limit, **422** for a bad format name or an empty upload.
+JSON output is embedded as a real object, not a quoted string. `stem` is the
+name the outputs are filed under; it is kept unique within a request, so
+`report.pdf` and `report.docx` uploaded together become `report.*` and
+`report_1.*` in a `/bundle` ZIP. `error_type` is one of `UnsupportedFormatError`,
+`EmptyUpload`, `UploadTooLarge`, `ConversionError` or `ParseError`.
+
+Status codes. `/parse` is 200 whenever the request itself was valid; **413**
+for too many files and **422** for a bad format name or no files at all.
+`/convert`, and `/bundle` when every document failed, map the failure to a
+status: **415** for an input format the pipeline does not accept, **413** for
+an upload over the size limit, **422** for an empty upload or a conversion or
+parse failure.
 
 Uploads are capped at 50 MB and 20 files per request (`MAX_UPLOAD_BYTES` and
-`MAX_FILES` in `api.py`). Each request works in a temporary directory that is
-deleted before the response is sent.
+`MAX_FILES` in `api.py`). Every upload is copied to disk in chunks and cut off
+as soon as it passes the cap, so an oversized body is never held in memory.
+Filenames are reduced to a bare, safe name before use. Each request works in a
+temporary directory that is deleted before the response is sent.
 
 ## Web app
 
@@ -148,7 +161,7 @@ Equivalent module form: `python -m documentai ...`
 | `--manifest [PATH]` | JSON summary of the run |
 | `--soffice PATH` | LibreOffice executable for Office inputs |
 | `--timeout SEC` | per-document LibreOffice timeout (default 180) |
-| `--no-overwrite` | fail instead of replacing existing outputs |
+| `--no-overwrite` | fail instead of replacing existing outputs (checked before any work, and covering the kept PDF and images too) |
 
 Exit code is `0` when every document succeeded, `1` when any failed, `2` on a
 usage error. One bad file never aborts a batch.
@@ -179,12 +192,17 @@ print(result.outputs["markdown"].read_text(encoding="utf-8"))
 ```
 
 Failures surface on the result object rather than as exceptions, so batches keep
-going:
+going. `error_type` names the exception class behind the message:
 
 ```python
 for result in pipeline.run_many(["a.pdf", "b.pptx", "c.epub"]):
-    print(result.source.name, "ok" if result.ok else result.error)
+    print(result.source.name, "ok" if result.ok else f"{result.error_type}: {result.error}")
 ```
+
+Outputs are filed under `result.stem`, which one pipeline keeps unique across
+everything it runs (`report`, then `report_1`, …). If you run a separate
+pipeline per document, `unique_stems(names)` applies the same rule up front and
+`pipeline.run(path, stem=...)` takes the result.
 
 Lower-level pieces are usable on their own:
 

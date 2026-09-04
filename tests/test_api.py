@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 
 import pytest
@@ -90,15 +91,51 @@ def test_unsupported_input_is_reported_per_file(client, sample_pdf, tmp_path):
     assert body["succeeded"] == 1 and body["failed"] == 1
     failure = next(r for r in body["results"] if not r["ok"])
     assert "no conversion strategy" in failure["error"]
+    assert failure["error_type"] == "UnsupportedFormatError"
 
 
-def test_empty_upload_is_rejected(client, tmp_path):
-    empty = tmp_path / "empty.pdf"
-    empty.write_bytes(b"")
-    response = client.post("/parse", files=_upload(empty))
+def test_empty_upload_is_reported_per_file(client, sample_pdf):
+    response = client.post(
+        "/parse?formats=text",
+        files=[
+            ("files", (sample_pdf.name, sample_pdf.read_bytes(), "application/pdf")),
+            ("files", ("empty.pdf", b"", "application/pdf")),
+        ],
+    )
+    body = response.json()
 
-    assert response.status_code == 422
-    assert "empty" in response.json()["detail"]
+    # Validation failures do not fail the batch either.
+    assert response.status_code == 200
+    assert body["succeeded"] == 1 and body["failed"] == 1
+    failure = next(r for r in body["results"] if not r["ok"])
+    assert failure["filename"] == "empty.pdf"
+    assert failure["error_type"] == "EmptyUpload" and "empty" in failure["error"]
+
+
+def test_oversized_upload_is_reported_per_file(client, sample_pdf, monkeypatch):
+    import api
+
+    monkeypatch.setattr(api, "MAX_UPLOAD_BYTES", 16)
+    response = client.post(
+        "/parse?formats=text",
+        files={"files": ("big.pdf", sample_pdf.read_bytes(), "application/pdf")},
+    )
+    result = response.json()["results"][0]
+
+    assert response.status_code == 200
+    assert result["ok"] is False
+    assert result["error_type"] == "UploadTooLarge" and "limit" in result["error"]
+
+
+def test_convert_maps_upload_errors_to_status_codes(client, sample_pdf, monkeypatch):
+    import api
+
+    empty = client.post("/convert", files={"file": ("empty.pdf", b"", "application/pdf")})
+    assert empty.status_code == 422
+
+    monkeypatch.setattr(api, "MAX_UPLOAD_BYTES", 16)
+    big = client.post("/convert", files=_upload(sample_pdf, field="file"))
+    assert big.status_code == 413
 
 
 def test_too_many_files_rejected(client, sample_pdf):
@@ -156,3 +193,78 @@ def test_filename_path_traversal_is_stripped(client, sample_pdf):
     assert result["ok"]
     assert "/" not in result["filename"] and "\\" not in result["filename"]
     assert result["filename"] == "evil.pdf"
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("../../evil.pdf", "evil.pdf"),
+        ("C:\\Users\\me\\evil.pdf", "evil.pdf"),  # Windows client, POSIX server
+        ("..", "document"),
+        (".", "document"),
+        ("", "document"),
+        (" report .PDF", "report.PDF"),
+        ("we|rd:name?.docx", "we_rd_name_.docx"),
+    ],
+)
+def test_filenames_are_sanitised(raw, expected):
+    from api import _safe_filename
+
+    assert _safe_filename(raw) == expected
+
+
+def test_dotdot_filename_is_handled_not_crashed(client, sample_pdf):
+    response = client.post(
+        "/parse?formats=text",
+        files={"files": ("..", sample_pdf.read_bytes(), "application/pdf")},
+    )
+    result = response.json()["results"][0]
+
+    assert response.status_code == 200
+    assert result["filename"] == "document"
+    # No extension survives, so the pipeline cannot pick a strategy.
+    assert result["ok"] is False and result["error_type"] == "UnsupportedFormatError"
+
+
+def test_parse_reports_unique_stems_for_duplicate_names(client, sample_pdf):
+    data = sample_pdf.read_bytes()
+    body = client.post(
+        "/parse?formats=text",
+        files=[("files", ("s.pdf", data, "application/pdf"))] * 2,
+    ).json()
+
+    assert all(r["ok"] for r in body["results"])
+    assert [r["stem"] for r in body["results"]] == ["s", "s_1"]
+
+
+def test_same_stem_uploads_get_distinct_bundle_entries(client, sample_pdf, sample_png):
+    response = client.post(
+        "/bundle?formats=text",
+        files=[
+            ("files", ("figure.pdf", sample_pdf.read_bytes(), "application/pdf")),
+            ("files", ("figure.png", sample_png.read_bytes(), "image/png")),
+        ],
+    )
+
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        names = archive.namelist()
+        manifest = json.loads(archive.read("manifest.json"))
+    assert names.count("figure.txt") == 1 and "figure_1.txt" in names
+    assert [entry["stem"] for entry in manifest] == ["figure", "figure_1"]
+
+
+def test_convert_passes_through_a_password_protected_pdf(client, sample_pdf, tmp_path):
+    import pymupdf
+
+    locked = tmp_path / "locked.pdf"
+    with pymupdf.open(sample_pdf) as doc:
+        doc.save(
+            locked, encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="secret", owner_pw="secret"
+        )
+
+    response = client.post("/convert", files=_upload(locked, field="file"))
+
+    # Conversion never opens the pages, so no password is needed.
+    assert response.status_code == 200
+    assert response.content == locked.read_bytes()
