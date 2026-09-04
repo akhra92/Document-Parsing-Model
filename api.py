@@ -17,6 +17,7 @@ import json
 import tempfile
 import zipfile
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
@@ -108,7 +109,7 @@ def _process(
             source.write_bytes(data)
 
             result = pipeline.run(source)
-            payload = {
+            payload: dict[str, Any] = {
                 "filename": name,
                 "ok": result.ok,
                 "strategy": result.strategy or None,

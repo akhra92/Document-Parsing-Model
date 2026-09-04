@@ -252,7 +252,7 @@ def main() -> None:
             type="primary",
         )
 
-    for tab, payload in zip(st.tabs([p["name"] for p in succeeded]), succeeded):
+    for tab, payload in zip(st.tabs([p["name"] for p in succeeded]), succeeded, strict=True):
         with tab:
             show_document(payload)
 

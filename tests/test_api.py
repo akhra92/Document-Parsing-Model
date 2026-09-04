@@ -9,9 +9,9 @@ import pytest
 
 pytest.importorskip("fastapi", reason="install the [api] extra to test the HTTP API")
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from api import MAX_FILES, app  # noqa: E402
+from api import MAX_FILES, app
 
 
 @pytest.fixture

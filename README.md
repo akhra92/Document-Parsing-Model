@@ -13,16 +13,23 @@ A PDF input skips the conversion work and goes straight to parsing.
 
 ## Install
 
+Python 3.10 or newer.
+
 ```bash
 conda create -n documentai python=3.11
 conda activate documentai
 pip install -e .                 # the library and CLI
-pip install -e ".[api,app,dev]"  # + HTTP API, Streamlit app, tests
+pip install -e ".[api,app,dev]"  # + HTTP API, Streamlit app, test and lint tools
 ```
 
-The extras are `api` (FastAPI + uvicorn), `app` (Streamlit), and `dev` (pytest).
-`requirements.txt` is separate — it is the manifest Streamlit Community Cloud
-installs from, so it pins only what the deployed web app needs.
+The extras are `api` (FastAPI + uvicorn), `app` (Streamlit), and `dev` (pytest,
+ruff, mypy, pre-commit). `requirements.txt` is separate — it is the manifest
+Streamlit Community Cloud installs from, so it pins only what the deployed web
+app needs.
+
+PyMuPDF, `pymupdf4llm` and `pymupdf-layout` are pinned to one exact version in
+both files, because `pymupdf4llm` itself requires the other two at its own
+version. Bump all three together.
 
 Office inputs (`.docx`, `.pptx`, `.xlsx`, `.odt`, …) additionally need
 [LibreOffice](https://www.libreoffice.org/). It is auto-detected on the PATH and
@@ -226,8 +233,13 @@ is both lossless and faster.
 ## How each format is produced
 
 - **Text** — `page.get_text("text", sort=True)` per page, joined with form feeds.
-- **Markdown** — `pymupdf4llm`, which reconstructs headings, lists and tables.
-  If it is not installed, a built-in font-size heuristic takes over so the
+- **Markdown** — `pymupdf4llm` running its *layout* engine (`pymupdf-layout`,
+  a small ONNX model that recovers reading order, headings, lists and tables).
+  `pymupdf4llm` also ships an older font-size engine that emits different
+  Markdown for the same PDF, so the package selects the layout engine
+  explicitly (`documentai.MARKDOWN_ENGINE`) and a test guards the choice;
+  `documentai.markdown_engine()` reports which one is active. If `pymupdf4llm`
+  is not installed at all, a built-in font-size heuristic takes over so the
   pipeline still produces Markdown.
 - **JSON** — `page.get_text("dict")` reshaped into a stable schema: document
   metadata, then each page with its text and blocks. Coordinates are PDF points
@@ -282,16 +294,22 @@ block text and geometry.
 
 Scanned PDFs contain no text layer; run OCR upstream if you need one.
 
-## Tests
+## Tests and checks
 
 ```bash
 conda activate documentai
 pip install -e ".[api,app,dev]"
-pytest
+pytest          # tests
+ruff check .    # lint
+mypy            # types (targets are set in pyproject.toml)
 ```
 
 The LibreOffice test is skipped automatically when LibreOffice is absent, and
 the API tests skip themselves when the `api` extra is not installed.
+
+`pre-commit install` wires the same lint and type checks into every commit. CI
+(`.github/workflows/ci.yml`) runs them plus the test suite on Python 3.10–3.13
+with LibreOffice installed, so nothing is skipped there.
 
 ## Project layout
 

@@ -5,7 +5,13 @@ import json
 import pytest
 
 from documentai.exceptions import ParseError
-from documentai.parsers import extract, normalize_format, parse_pdf
+from documentai.parsers import (
+    MARKDOWN_ENGINE,
+    extract,
+    markdown_engine,
+    normalize_format,
+    parse_pdf,
+)
 
 
 def test_parse_pdf_extracts_every_format(sample_pdf):
@@ -81,6 +87,20 @@ def test_json_spans_can_be_omitted(sample_pdf):
 def test_markdown_marks_up_headings(sample_pdf):
     markdown = extract(sample_pdf, "md")
     assert any(line.startswith("#") and "Heading" in line for line in markdown.splitlines())
+
+
+def test_markdown_runs_on_the_pinned_engine(sample_pdf):
+    """pymupdf4llm's two engines emit different Markdown for the same PDF, so
+    the package pins one and this test fails if a dependency change flips it."""
+    pymupdf4llm = pytest.importorskip("pymupdf4llm")
+    pymupdf = pytest.importorskip("pymupdf")
+
+    assert MARKDOWN_ENGINE == "layout"
+    assert markdown_engine() == "layout"
+
+    extract(sample_pdf, "md")  # the engine is selected before the first extraction
+    assert pymupdf4llm._use_layout is True
+    assert callable(pymupdf._get_layout), "pymupdf-layout model was not activated"
 
 
 def test_only_requested_formats_are_extracted(sample_pdf):

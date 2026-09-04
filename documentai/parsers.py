@@ -13,12 +13,14 @@ import pymupdf
 from .exceptions import ParseError
 
 __all__ = [
+    "MARKDOWN_ENGINE",
     "OUTPUT_FORMATS",
     "ParsedDocument",
     "extract",
     "extract_json",
     "extract_markdown",
     "extract_text",
+    "markdown_engine",
     "parse_pdf",
 ]
 
@@ -30,6 +32,15 @@ _ALIASES = {"txt": "text", "text": "text", "md": "markdown", "markdown": "markdo
             "json": "json"}
 
 _PAGE_BREAK = "\f"
+
+#: The Markdown engine this package is pinned to and tested against.
+#:
+#: pymupdf4llm ships two: the *layout* engine (``pymupdf-layout``, an ONNX model
+#: that recovers reading order, headings and tables) and the older font-size
+#: *legacy* engine. They produce noticeably different Markdown for the same PDF,
+#: so the choice is made explicitly here rather than left to whichever one
+#: pymupdf4llm happens to default to. See :func:`markdown_engine`.
+MARKDOWN_ENGINE = "layout"
 
 #: Bit 4 of a span's ``flags`` marks bold, bit 1 marks italic.
 _FLAG_BOLD = 2 ** 4
@@ -128,7 +139,7 @@ def extract(pdf_path: str | Path, fmt: str, **kwargs) -> str:
 def extract_text(doc: pymupdf.Document, *, sort: bool = True) -> str:
     """Plain text, one form feed (``\\f``) between pages."""
     pages = []
-    for page in doc:
+    for page in doc.pages():
         pages.append(page.get_text("text", sort=sort).rstrip())
     return (_PAGE_BREAK + "\n").join(pages).rstrip() + "\n"
 
@@ -151,7 +162,7 @@ def extract_json(
         "source": Path(source).name if source else None,
         "page_count": doc.page_count,
         "metadata": {k: v for k, v in (doc.metadata or {}).items() if v},
-        "pages": [_page_payload(page, spans=spans, sort=sort) for page in doc],
+        "pages": [_page_payload(page, spans=spans, sort=sort) for page in doc.pages()],
     }
     text = json_lib.dumps(payload, indent=indent, ensure_ascii=False)
     return (_inline_number_arrays(text) if indent else text) + "\n"
@@ -172,6 +183,7 @@ def extract_markdown(
         import pymupdf4llm
     except ImportError:
         return _heuristic_markdown(doc), []
+    _select_markdown_engine(pymupdf4llm)
 
     kwargs: dict = {"show_progress": False}
     images: list[Path] = []
@@ -190,6 +202,33 @@ def extract_markdown(
         images = sorted(set(image_dir.iterdir()) - before)
         markdown = _relink_images(markdown, image_dir, image_link_base)
     return markdown, images
+
+
+def markdown_engine() -> str:
+    """Report which Markdown engine :func:`extract_markdown` will run.
+
+    ``"layout"`` or ``"legacy"`` are the two pymupdf4llm engines (see
+    :data:`MARKDOWN_ENGINE`); ``"heuristic"`` means pymupdf4llm is not
+    installed and the built-in font-size fallback is used instead.
+    """
+    try:
+        import pymupdf4llm
+    except ImportError:
+        return "heuristic"
+    _select_markdown_engine(pymupdf4llm)
+    return "layout" if getattr(pymupdf4llm, "_use_layout", False) else "legacy"
+
+
+_engine_selected = False
+
+
+def _select_markdown_engine(pymupdf4llm) -> None:
+    """Pin pymupdf4llm to :data:`MARKDOWN_ENGINE`, once per process."""
+    global _engine_selected
+    if _engine_selected:
+        return
+    pymupdf4llm.use_layout(MARKDOWN_ENGINE == "layout")
+    _engine_selected = True
 
 
 # --------------------------------------------------------------------------- #
@@ -281,23 +320,23 @@ def _relink_images(markdown: str, image_dir: Path, link_base: str | None) -> str
 def _heuristic_markdown(doc: pymupdf.Document) -> str:
     """Minimal Markdown: promote spans larger than body text to headings."""
     sizes: Counter[float] = Counter()
-    for page in doc:
+    for page in doc.pages():
         for block in page.get_text("dict")["blocks"]:
-            for line in block.get("lines", ()):
+            for line in block.get("lines", []):
                 for span in line["spans"]:
                     if span["text"].strip():
                         sizes[round(span["size"], 1)] += len(span["text"])
     body_size = sizes.most_common(1)[0][0] if sizes else 11.0
 
     chunks: list[str] = []
-    for number, page in enumerate(doc, start=1):
+    for number, page in enumerate(doc.pages(), start=1):
         if number > 1:
             chunks.append("\n---\n")
         for block in page.get_text("dict")["blocks"]:
             lines = []
             max_size = 0.0
             bold = True
-            for line in block.get("lines", ()):
+            for line in block.get("lines", []):
                 spans = [s for s in line["spans"] if s["text"].strip()]
                 if not spans:
                     continue

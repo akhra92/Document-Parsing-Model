@@ -23,23 +23,26 @@ from .exceptions import (
 )
 from .formats import is_supported, supported_extensions
 from .parsers import (
+    MARKDOWN_ENGINE,
     OUTPUT_FORMATS,
     ParsedDocument,
     extract,
     extract_json,
     extract_markdown,
     extract_text,
+    markdown_engine,
     parse_pdf,
 )
 from .pipeline import DocumentPipeline, DocumentResult, collect_inputs, write_manifest
 
 __all__ = [
+    "MARKDOWN_ENGINE",
+    "OUTPUT_FORMATS",
     "ConversionError",
     "ConversionResult",
     "DocumentAIError",
     "DocumentPipeline",
     "DocumentResult",
-    "OUTPUT_FORMATS",
     "ParseError",
     "ParsedDocument",
     "UnsupportedFormatError",
@@ -51,6 +54,7 @@ __all__ = [
     "extract_markdown",
     "extract_text",
     "is_supported",
+    "markdown_engine",
     "parse_pdf",
     "supported_extensions",
     "write_manifest",

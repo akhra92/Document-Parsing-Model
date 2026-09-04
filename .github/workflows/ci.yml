@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[api,app,dev]"
+      - name: Ruff
+        run: ruff check .
+      - name: mypy
+        run: mypy
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install LibreOffice
+        # The same packages Streamlit Community Cloud installs from packages.txt.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends $(cat packages.txt)
+      - name: Install
+        run: pip install -e ".[api,app,dev]"
+      - name: LibreOffice must be detected, so the Office tests really run
+        run: python -c "from documentai.converters import find_soffice; assert find_soffice(), 'soffice not found'"
+      - name: Tests
+        run: pytest -rs

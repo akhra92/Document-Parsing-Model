@@ -34,10 +34,10 @@ OFFICE_EXTS = frozenset(
 )
 
 _STRATEGY_BY_EXT: dict[str, str] = {
-    **{ext: "passthrough" for ext in PDF_EXTS},
-    **{ext: "pymupdf" for ext in NATIVE_EXTS},
-    **{ext: "image" for ext in IMAGE_EXTS},
-    **{ext: "office" for ext in OFFICE_EXTS},
+    **dict.fromkeys(PDF_EXTS, "passthrough"),
+    **dict.fromkeys(NATIVE_EXTS, "pymupdf"),
+    **dict.fromkeys(IMAGE_EXTS, "image"),
+    **dict.fromkeys(OFFICE_EXTS, "office"),
 }
 
 SUPPORTED_EXTS = frozenset(_STRATEGY_BY_EXT)
