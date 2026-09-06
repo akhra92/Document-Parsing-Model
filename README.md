@@ -3,6 +3,8 @@
 A document parsing pipeline built on **PyMuPDF**. Every input is normalised to
 PDF first, then parsed into **plain text**, **Markdown** and **structured JSON**.
 
+Try -> [Online Demo](https://document-parsing-model.streamlit.app/)
+
 ```
 input (any supported format) ──▶ stage 1: convert to PDF ──▶ stage 2: parse ──┬─▶ .txt
                                                                               ├─▶ .md
