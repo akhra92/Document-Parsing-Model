@@ -27,10 +27,6 @@ ruff, mypy, pre-commit). `requirements.txt` is separate — it is the manifest
 Streamlit Community Cloud installs from, so it pins only what the deployed web
 app needs.
 
-PyMuPDF, `pymupdf4llm` and `pymupdf-layout` are pinned to one exact version in
-both files, because `pymupdf4llm` itself requires the other two at its own
-version. Bump all three together.
-
 Office inputs (`.docx`, `.pptx`, `.xlsx`, `.odt`, …) additionally need
 [LibreOffice](https://www.libreoffice.org/). It is auto-detected on the PATH and
 in the usual install locations; otherwise point `--soffice` or the
@@ -83,57 +79,6 @@ response is still 200:
 }
 ```
 
-JSON output is embedded as a real object, not a quoted string. `stem` is the
-name the outputs are filed under; it is kept unique within a request, so
-`report.pdf` and `report.docx` uploaded together become `report.*` and
-`report_1.*` in a `/bundle` ZIP. `error_type` is one of `UnsupportedFormatError`,
-`EmptyUpload`, `UploadTooLarge`, `ConversionError` or `ParseError`.
-
-Status codes. `/parse` is 200 whenever the request itself was valid; **413**
-for too many files and **422** for a bad format name or no files at all.
-`/convert`, and `/bundle` when every document failed, map the failure to a
-status: **415** for an input format the pipeline does not accept, **413** for
-an upload over the size limit, **422** for an empty upload or a conversion or
-parse failure.
-
-`/bundle?images=true` requires the `markdown` format, because the images are
-written while the Markdown is extracted; asking for them without it is a 422
-rather than a silent no-op. The same rule applies to the CLI's `--images` and
-to `DocumentPipeline(extract_images=True)`.
-
-### Settings
-
-Everything is read from the environment when the service starts. A value that
-is not a number, or is out of range, stops the service from starting.
-
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `DOCUMENTAI_MAX_UPLOAD_BYTES` | `52428800` (50 MiB) | per-file size cap |
-| `DOCUMENTAI_MAX_FILES` | `20` | files per request |
-| `DOCUMENTAI_MAX_CONCURRENCY` | `2` | conversions running at once |
-| `DOCUMENTAI_QUEUE_TIMEOUT` | `30` | seconds a request waits for a free slot before **503** |
-
-Every upload is copied to disk in chunks and cut off as soon as it passes the
-cap, so an oversized body is never held in memory. Filenames are reduced to a
-bare, safe name before use. Each request works in a temporary directory that
-is deleted before the response is sent.
-
-Conversions are the expensive part - each Office document means a LibreOffice
-process of a few hundred megabytes - so only `DOCUMENTAI_MAX_CONCURRENCY` of
-them run at once. Further requests queue for up to `DOCUMENTAI_QUEUE_TIMEOUT`
-seconds, then get a **503** with a `Retry-After` header. `GET /formats`
-reports the limits in force.
-
-### Request IDs
-
-Every response carries an `X-Request-ID` header, and every error body repeats
-it as `request_id` - including FastAPI's own validation errors and unexpected
-500s, whose bodies say only that something went wrong. Quote the id when
-reporting a problem; the server log line for the failure carries the same id.
-A client may supply its own `X-Request-ID` (up to 64 characters of letters,
-digits, `.`, `_` and `-`) and it is echoed back, which makes tracing across
-services easy.
-
 ### Running in Docker
 
 The `Dockerfile` builds the API with LibreOffice and fonts, running as an
@@ -159,30 +104,6 @@ results and download them individually or as a ZIP.
 ```bash
 streamlit run app.py
 ```
-
-### Deploying to Streamlit Community Cloud
-
-1. Push this repository to GitHub.
-2. At [share.streamlit.io](https://share.streamlit.io) choose **Create app → Deploy
-   a public app from GitHub**, select the repo and branch, and set the main file
-   path to `app.py`.
-3. Deploy. The first build takes several minutes because `packages.txt` installs
-   LibreOffice.
-
-The deployment files:
-
-| File | Purpose |
-| --- | --- |
-| `app.py` | the entry point Streamlit Cloud runs |
-| `requirements.txt` | Python dependencies (includes `streamlit`) |
-| `packages.txt` | apt packages — LibreOffice, for the Office formats |
-| `.streamlit/config.toml` | upload cap and theme |
-
-The app degrades gracefully: if LibreOffice is unavailable the sidebar says so
-and every non-Office format still works. Community Cloud gives an app ~1 GB of
-memory, so `config.toml` caps uploads at 50 MB — a large scanned PDF can still
-exhaust that. Uploads are processed in a temporary directory that is deleted as
-soon as the outputs are read into memory; nothing persists on the server.
 
 ## Usage
 
@@ -227,42 +148,6 @@ output/
 └── manifest.json       # only with --manifest
 ```
 
-## Python API
-
-```python
-from documentai import DocumentPipeline
-
-pipeline = DocumentPipeline("output", formats=["text", "markdown"], keep_pdf=True)
-result = pipeline.run("contract.docx")
-
-print(result.strategy)                 # "libreoffice"
-print(result.page_count)               # 12
-print(result.outputs["markdown"].read_text(encoding="utf-8"))
-```
-
-Failures surface on the result object rather than as exceptions, so batches keep
-going. `error_type` names the exception class behind the message:
-
-```python
-for result in pipeline.run_many(["a.pdf", "b.pptx", "c.epub"]):
-    print(result.source.name, "ok" if result.ok else f"{result.error_type}: {result.error}")
-```
-
-Outputs are filed under `result.stem`, which one pipeline keeps unique across
-everything it runs (`report`, then `report_1`, …). If you run a separate
-pipeline per document, `unique_stems(names)` applies the same rule up front and
-`pipeline.run(path, stem=...)` takes the result.
-
-Lower-level pieces are usable on their own:
-
-```python
-from documentai import convert_to_pdf, extract, parse_pdf
-
-convert_to_pdf("slides.pptx", "slides.pdf")
-markdown = extract("slides.pdf", "md")
-parsed = parse_pdf("slides.pdf", ["text", "json"])   # opens the file once
-```
-
 ## Supported inputs
 
 | Category | Extensions | Conversion strategy |
@@ -274,109 +159,6 @@ parsed = parse_pdf("slides.pdf", ["text", "json"])   # opens the file once
 
 `documentai --help` prints the full list. Unsupported extensions are skipped
 when scanning a directory, and reported as an error when named explicitly.
-
-### Why text, Markdown and HTML are not inputs
-
-Inputs are limited to **binary or paginated** formats — ones whose structure has
-to be recovered from a rendered layout. Text, Markdown and HTML already carry
-their structure explicitly (`<h1>`, `<table>`, `<a href>`), and this pipeline
-reconstructs structure *statistically from geometry* — "this span is 1.5× body
-size, therefore a heading". Feeding it markup would mean discarding known
-structure and guessing it back. Measured on a 310-byte Markdown file, the
-round trip lost:
-
-| Input | After a `.md` → PDF → `.md` round trip |
-| --- | --- |
-| `[the dashboard](https://example.com/dash)` | `the dashboard` — **URL gone** |
-| a 4-row Markdown table | `<!-- picture text -->Region Revenue<br>EU 1.2M…` |
-| `> Margin held at 32%.` | plain paragraph, quote lost |
-| ` ```python ` | ` ``` `, language lost |
-
-The three remaining strategies are all faithful: they either preserve the
-original pages or render a layout the source itself defines. Text, Markdown and
-JSON are what this package *emits* — for those inputs, reading the file directly
-is both lossless and faster.
-
-## How each format is produced
-
-- **Text** — `page.get_text("text", sort=True)` per page, joined with form feeds.
-- **Markdown** — `pymupdf4llm` running its *layout* engine (`pymupdf-layout`,
-  a small ONNX model that recovers reading order, headings, lists and tables).
-  `pymupdf4llm` also ships an older font-size engine that emits different
-  Markdown for the same PDF, so the package selects the layout engine
-  explicitly (`documentai.MARKDOWN_ENGINE`) and a test guards the choice;
-  `documentai.markdown_engine()` reports which one is active. If `pymupdf4llm`
-  is not installed at all, a built-in font-size heuristic takes over so the
-  pipeline still produces Markdown.
-- **JSON** — `page.get_text("dict")` reshaped into a stable schema: document
-  metadata, then each page with its text and blocks. Coordinates are PDF points
-  with the origin at the page's top-left corner.
-
-```jsonc
-{
-  "source": "report.pdf",
-  "page_count": 2,
-  "metadata": { "title": "…", "creationDate": "…" },
-  "pages": [
-    {
-      "number": 1,
-      "width": 595.0,
-      "height": 842.0,
-      "text": "Quarterly Report\nRevenue grew 18% …",
-      "blocks": [
-        {
-          "number": 0,
-          "type": "text",
-          "bbox": [64.0, 71.9, 231.4, 92.0],
-          "text": "Quarterly Report",
-          "lines": [
-            {
-              "bbox": [64.0, 71.9, 231.4, 92.0],
-              "text": "Quarterly Report",
-              "spans": [
-                {
-                  "text": "Quarterly Report",
-                  "font": "NimbusSans-Bold",
-                  "size": 20.0,
-                  "bold": true,
-                  "italic": false,
-                  "color": "#000000",
-                  "bbox": [64.0, 71.9, 231.4, 92.0]
-                }
-              ]
-            }
-          ]
-        },
-        { "number": 5, "type": "image", "bbox": [64.0, 300.1, 320.0, 460.0],
-          "width": 480, "height": 300, "ext": "png" }
-      ]
-    }
-  ]
-}
-```
-
-Image blocks carry placement and size but never raw bytes — use `--images` to
-write the actual files. `--no-spans` drops the `spans` key when you only need
-block text and geometry.
-
-Scanned PDFs contain no text layer; run OCR upstream if you need one.
-
-## Tests and checks
-
-```bash
-conda activate documentai
-pip install -e ".[api,app,dev]"
-pytest          # tests
-ruff check .    # lint
-mypy            # types (targets are set in pyproject.toml)
-```
-
-The LibreOffice test is skipped automatically when LibreOffice is absent, and
-the API tests skip themselves when the `api` extra is not installed.
-
-`pre-commit install` wires the same lint and type checks into every commit. CI
-(`.github/workflows/ci.yml`) runs them plus the test suite on Python 3.10–3.13
-with LibreOffice installed, so nothing is skipped there.
 
 ## Project layout
 
