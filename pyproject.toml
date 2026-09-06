@@ -52,6 +52,9 @@ include = ["documentai*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# api.py and app.py live at the repository root; a bare `pytest` (unlike
+# `python -m pytest`) does not put the cwd on sys.path, so add it explicitly.
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
@@ -87,3 +90,12 @@ no_implicit_optional = true
 # Neither ships type information.
 module = ["pymupdf4llm", "pymupdf4llm.*", "streamlit", "streamlit.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# numpy's stubs use the 3.12 `type` statement, which mypy refuses to parse when
+# targeting 3.10 (Pillow, pulled in by PyMuPDF, imports numpy). We never use
+# numpy ourselves, so skip it. Stubs are followed regardless of follow_imports
+# unless follow_imports_for_stubs is set, hence both.
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
