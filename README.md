@@ -30,9 +30,7 @@ Streamlit Community Cloud installs from, so it pins only what the deployed web
 app needs.
 
 Office inputs (`.docx`, `.pptx`, `.xlsx`, `.odt`, …) additionally need
-[LibreOffice](https://www.libreoffice.org/). It is auto-detected on the PATH and
-in the usual install locations; otherwise point `--soffice` or the
-`DOCUMENTAI_SOFFICE` environment variable at the executable.
+[LibreOffice](https://www.libreoffice.org/).
 
 ## HTTP API
 
